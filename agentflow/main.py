@@ -4,20 +4,28 @@ from contextlib import asynccontextmanager
 
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from agentflow.config import get_settings
 from agentflow.contracts import RunResponse, WorkflowResponse, WorkflowVersionResponse
 from agentflow.database import engine, get_session
-from agentflow.execution import execute_workflow
-from agentflow.models import Workflow, WorkflowRun, WorkflowVersion
+from agentflow.execution import enqueue_workflow
+from agentflow.models import (
+    RunStatus,
+    StepRun,
+    Workflow,
+    WorkflowRun,
+    WorkflowVersion,
+    transition_status,
+    utcnow,
+)
 from agentflow.registry import action_catalog
 from agentflow.workflows import WorkflowDefinition, validate_definition
 
@@ -55,7 +63,7 @@ app.add_middleware(
     allow_origins=get_settings().cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Idempotency-Key"],
 )
 
 
@@ -124,11 +132,14 @@ def serialize_run(run: WorkflowRun) -> dict:
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
+        "cancel_requested_at": run.cancel_requested_at,
         "summary": {
             "total_steps": total_steps,
             "succeeded_steps": succeeded_steps,
             "failed_steps": failed_steps,
-            "not_started_steps": max(total_steps - len(run.steps), 0),
+            "not_started_steps": max(
+                total_steps - sum(step.status != "queued" for step in run.steps), 0
+            ),
         },
         "steps": [
             {
@@ -141,6 +152,18 @@ def serialize_run(run: WorkflowRun) -> dict:
                 "error_category": step.error_category,
                 "started_at": step.started_at,
                 "finished_at": step.finished_at,
+                "attempts": [
+                    {
+                        "attempt_number": attempt.attempt_number,
+                        "status": attempt.status,
+                        "output": attempt.output,
+                        "error": attempt.error,
+                        "error_category": attempt.error_category,
+                        "started_at": attempt.started_at,
+                        "finished_at": attempt.finished_at,
+                    }
+                    for attempt in step.attempts
+                ],
             }
             for step in run.steps
         ],
@@ -230,7 +253,12 @@ def list_workflow_versions(workflow_id: int, session: Session = Depends(get_sess
     ).all()
 
 
-def start_run_for_version(workflow_id: int, version_number: int | None, session: Session) -> dict:
+def start_run_for_version(
+    workflow_id: int,
+    version_number: int | None,
+    session: Session,
+    idempotency_key: str | None,
+) -> dict:
     workflow = get_workflow_or_404(session, workflow_id)
     if version_number is None:
         version = workflow.current_version
@@ -240,24 +268,80 @@ def start_run_for_version(workflow_id: int, version_number: int | None, session:
         )
         if version is None:
             raise HTTPException(status_code=404, detail="Workflow version not found")
-    run = execute_workflow(session, workflow, version)
+    try:
+        run = enqueue_workflow(session, workflow, version, idempotency_key=idempotency_key)
+    except SQLAlchemyError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Run was not accepted because the durable queue is unavailable.",
+        ) from exc
     return serialize_run(run)
 
 
-@app.post("/api/workflows/{workflow_id}/runs", status_code=201, response_model=RunResponse)
-def start_run(workflow_id: int, session: Session = Depends(get_session)):
-    return start_run_for_version(workflow_id, None, session)
+@app.post("/api/workflows/{workflow_id}/runs", status_code=202, response_model=RunResponse)
+def start_run(
+    workflow_id: int,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    session: Session = Depends(get_session),
+):
+    if idempotency_key is not None and (
+        not idempotency_key or idempotency_key.strip() != idempotency_key
+    ):
+        raise HTTPException(status_code=422, detail="Idempotency-Key must be non-empty and trimmed")
+    return start_run_for_version(workflow_id, None, session, idempotency_key)
 
 
 @app.post(
     "/api/workflows/{workflow_id}/versions/{version_number}/runs",
-    status_code=201,
+    status_code=202,
     response_model=RunResponse,
 )
 def start_version_run(
-    workflow_id: int, version_number: int, session: Session = Depends(get_session)
+    workflow_id: int,
+    version_number: int,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    session: Session = Depends(get_session),
 ):
-    return start_run_for_version(workflow_id, version_number, session)
+    if idempotency_key is not None and (
+        not idempotency_key or idempotency_key.strip() != idempotency_key
+    ):
+        raise HTTPException(status_code=422, detail="Idempotency-Key must be non-empty and trimmed")
+    return start_run_for_version(workflow_id, version_number, session, idempotency_key)
+
+
+@app.post("/api/runs/{run_id}/cancel", response_model=RunResponse)
+def cancel_run(run_id: int, session: Session = Depends(get_session)):
+    run = session.scalar(
+        select(WorkflowRun)
+        .where(WorkflowRun.id == run_id)
+        .options(
+            selectinload(WorkflowRun.steps).selectinload(StepRun.attempts),
+            selectinload(WorkflowRun.workflow_version),
+            selectinload(WorkflowRun.job),
+        )
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}:
+        return serialize_run(run)
+    timestamp = utcnow()
+    if run.status in {RunStatus.QUEUED, RunStatus.RETRYING}:
+        run.status = transition_status(run.status, RunStatus.CANCELLED, entity="run")
+        run.error = "Run cancelled before the worker started it."
+        run.error_category = "cancelled"
+        run.finished_at = timestamp
+        if run.job:
+            run.job.status = "cancelled"
+            run.job.locked_by = None
+            run.job.lease_expires_at = None
+            run.job.updated_at = timestamp
+    elif run.status == RunStatus.RUNNING:
+        run.status = transition_status(run.status, RunStatus.CANCEL_REQUESTED, entity="run")
+        run.cancel_requested_at = timestamp
+    session.commit()
+    session.refresh(run)
+    return serialize_run(run)
 
 
 @app.get("/api/runs/{run_id}", response_model=RunResponse)
@@ -265,7 +349,10 @@ def get_run(run_id: int, session: Session = Depends(get_session)):
     run = session.scalar(
         select(WorkflowRun)
         .where(WorkflowRun.id == run_id)
-        .options(selectinload(WorkflowRun.steps), selectinload(WorkflowRun.workflow_version))
+        .options(
+            selectinload(WorkflowRun.steps).selectinload(StepRun.attempts),
+            selectinload(WorkflowRun.workflow_version),
+        )
     )
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -279,7 +366,10 @@ def list_runs(
 ):
     runs = session.scalars(
         select(WorkflowRun)
-        .options(selectinload(WorkflowRun.steps), selectinload(WorkflowRun.workflow_version))
+        .options(
+            selectinload(WorkflowRun.steps).selectinload(StepRun.attempts),
+            selectinload(WorkflowRun.workflow_version),
+        )
         .order_by(WorkflowRun.id.desc())
         .limit(limit)
     ).all()

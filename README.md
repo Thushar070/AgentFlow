@@ -44,11 +44,25 @@ Definitions use schema version 1 and contain 1–50 uniquely identified steps. I
 }
 ```
 
-Registered actions: `set_value`, `uppercase`, and `append`. `GET /api/actions` returns each action's input/output JSON schemas, required permissions, and timeout policy. The built-in actions are local and deterministic, require no permissions, and have bounded inputs; their policy does not impose a wall-clock timeout or interrupt a running handler. Definitions are limited to 50 steps and 512 KiB. Unknown actions, extra fields, malformed or forward references, duplicate IDs, invalid inputs, oversized steps, and oversized definitions are rejected. Each workflow has immutable numbered definition versions. `POST /api/workflows/{id}/runs` executes the current version; `POST /api/workflows/{id}/versions/{version}/runs` explicitly executes an older version. Workflow reads retain the compatible top-level `definition` field. `PUT /api/workflows/{id}` creates a new version rather than changing definitions attached to prior runs. A run pins its workflow version and persists the execution and all step outcomes in one transaction. Run responses include a derived step-count summary and failure category; failed actions stop later steps, and database commit failures roll back that run. Execution remains synchronous in the API request. This version does not queue work, retry, cancel, authenticate users, or isolate tenants; do not expose it as a shared production service.
+Registered actions: `set_value`, `uppercase`, and `append`. `GET /api/actions` returns each action's schemas, required permissions, timeout, retry, and replay policy. `ACTION_TIMEOUTS` may override action timeouts with a JSON object, for example `{"uppercase":2}`; each value must be greater than 0 and at most 300 seconds. Actions run in separate processes so a timed-out or cancelled action can be terminated. Each action has a bounded retry count and exponential backoff. Definitions are limited to 50 steps and 512 KiB. Unknown actions, extra fields, malformed or forward references, duplicate IDs, invalid inputs, oversized steps, and oversized definitions are rejected. Each workflow has immutable numbered definition versions. `POST /api/workflows/{id}/runs` queues the current version; `POST /api/workflows/{id}/versions/{version}/runs` queues a selected older version. Both return HTTP 202 with the persisted run, and accept an optional `Idempotency-Key` header to deduplicate a caller's repeated start request for that workflow. `POST /api/runs/{id}/cancel` cancels queued work or requests cancellation of a running action. Workflow reads retain the compatible top-level `definition` field. `PUT /api/workflows/{id}` creates a new version rather than changing definitions attached to prior runs. A run pins its workflow version. Run responses include step summaries and persisted attempt history.
+
+### Background worker and recovery
+
+Run records and queue rows are stored in the same configured database and committed atomically. Start the API and a separate worker process; the worker continuously claims durable jobs using expiring, fenced leases:
+
+```sh
+python -m agentflow.worker
+# or
+make worker
+```
+
+If no worker is running, runs remain queued. If a worker stops after claiming work, another worker can reclaim the job after its lease expires and resume from completed steps. Each attempt and retry time is persisted. Repeated delivery can rerun an action whose result was not saved; current built-in actions are pure local operations, so this does not repeat external side effects. External side-effect actions are not supported until they provide an idempotency/reconciliation contract. Do not interpret this system as providing exactly-once external execution. If the database is unavailable, the API does not accept the run; an accepted queued run is never reported successful until the worker persists completion. Configure the API and worker with the same `DATABASE_URL` and `ACTION_TIMEOUTS` values.
+
+This version does not authenticate users or isolate tenants; do not expose it as a shared production service.
 
 ### Database migration
 
-Alembic manages schema changes. For a fresh SQLite database run `alembic upgrade head`. The Phase 1 schema is upgraded in place while preserving its workflows and execution history. Back up the database file before upgrading an existing installation, for example `cp agentflow.db agentflow.db.bak`; migrations never delete or reset the database. The current revision is `d9156bc2a041`, following `70b823ceda15` and `0432ed0b773b`. Downgrade is intentionally disabled because converting immutable version history back to the Phase 1 schema would discard data.
+Alembic manages schema changes. For a fresh SQLite database run `alembic upgrade head`. The Phase 1 schema is upgraded in place while preserving its workflows and execution history. Back up the database file before upgrading an existing installation, for example `cp agentflow.db agentflow.db.bak`; migrations never delete or reset the database. The current revision is `6ab9d731c2f0`, following `d9156bc2a041`, `70b823ceda15`, and `0432ed0b773b`. Downgrade is intentionally disabled because it would discard queue and attempt history.
 
 ## Checks
 
@@ -61,4 +75,4 @@ cd apps/web && npm run lint && npm run typecheck && npm run format:check && npm 
 
 ## Architecture and next steps
 
-`agentflow/workflows.py` owns the definition contract, `registry.py` the fixed action catalog, `execution.py` the sequential coordinator, `models.py` persistent records, and `main.py` the HTTP boundary. `migrations/versions/` contains the Alembic schema history. The Next.js dashboard talks to the API only. SQLAlchemy isolates persistence behind `DATABASE_URL`; SQLite keeps local development service-free. Background jobs, authentication/authorization, audit events, advanced retry/recovery, and AI workflow proposals remain future work.
+`agentflow/workflows.py` owns the definition contract, `registry.py` the fixed action catalog, `execution.py` durable submission, `worker.py` lease/retry/recovery coordination, `models.py` persistent records, and `main.py` the HTTP boundary. `migrations/versions/` contains the Alembic schema history. The Next.js dashboard talks to the API only. SQLAlchemy isolates persistence behind `DATABASE_URL`; the database-backed queue keeps local development service-free. Authentication/authorization, approval workflows, and AI workflow proposals remain future work.

@@ -6,6 +6,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from agentflow.config import get_settings
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -44,9 +46,9 @@ class ActionErrorCategory(StrEnum):
 
 
 class TimeoutPolicy(StrEnum):
-    """Phase 3 policy for bounded local actions; hard cancellation is Phase 4."""
+    """Registered action timeout behavior."""
 
-    BOUNDED_LOCAL = "bounded_local_no_wall_clock_timeout"
+    PROCESS_INTERRUPTIBLE = "separate_process_hard_timeout"
 
 
 class ActionFailure(ValueError):
@@ -63,7 +65,12 @@ class ActionSpec:
     handler: Any
     description: str
     required_permissions: tuple[str, ...] = ()
-    timeout_policy: TimeoutPolicy = TimeoutPolicy.BOUNDED_LOCAL
+    timeout_policy: TimeoutPolicy = TimeoutPolicy.PROCESS_INTERRUPTIBLE
+    timeout_seconds: float = 5.0
+    max_attempts: int = 3
+    retryable_categories: tuple[str, ...] = ("execution_failed", "action_timeout")
+    backoff_base_seconds: float = 0.5
+    idempotent_replay: bool = True
 
 
 def set_value(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -85,6 +92,17 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
     "uppercase": ActionSpec(UppercaseInput, TextOutput, uppercase, "Convert text to uppercase."),
     "append": ActionSpec(AppendInput, TextOutput, append_text, "Append a configured text suffix."),
 }
+
+
+def action_timeout(action: str) -> float:
+    spec = action_spec(action)
+    overrides = get_settings().action_timeouts
+    unknown = set(overrides) - set(ACTION_REGISTRY)
+    if unknown:
+        raise ValueError(
+            f"ACTION_TIMEOUTS contains unregistered actions: {', '.join(sorted(unknown))}"
+        )
+    return overrides.get(action, spec.timeout_seconds)
 
 
 def action_spec(action: str) -> ActionSpec:
@@ -160,6 +178,11 @@ def action_catalog() -> list[dict[str, Any]]:
             "output_schema": spec.output_schema.model_json_schema(),
             "required_permissions": list(spec.required_permissions),
             "timeout_policy": spec.timeout_policy.value,
+            "timeout_seconds": action_timeout(key),
+            "max_attempts": spec.max_attempts,
+            "retryable_categories": list(spec.retryable_categories),
+            "backoff_base_seconds": spec.backoff_base_seconds,
+            "idempotent_replay": spec.idempotent_replay,
         }
         for key, spec in ACTION_REGISTRY.items()
     ]

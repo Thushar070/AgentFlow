@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
+from conftest import run_worker_once
+
 from agentflow.workflows import MAX_DEFINITION_BYTES
 
 
@@ -13,6 +15,8 @@ def test_health_and_action_catalog(client):
     }
     assert catalog["uppercase"]["output_schema"]["type"] == "object"
     assert catalog["uppercase"]["required_permissions"] == []
+    assert catalog["uppercase"]["timeout_policy"] == "separate_process_hard_timeout"
+    assert catalog["uppercase"]["max_attempts"] == 3
 
 
 def test_create_and_read_workflow(client, valid_definition):
@@ -43,6 +47,11 @@ def test_workflow_update_creates_version_and_old_version_can_run(client, valid_d
 
     latest_run = client.post(f"/api/workflows/{workflow['id']}/runs").json()
     old_run = client.post(f"/api/workflows/{workflow['id']}/versions/1/runs").json()
+    assert latest_run["status"] == old_run["status"] == "queued"
+    run_worker_once(client)
+    run_worker_once(client)
+    latest_run = client.get(f"/api/runs/{latest_run['id']}").json()
+    old_run = client.get(f"/api/runs/{old_run['id']}").json()
     assert latest_run["workflow_version_number"] == 2
     assert latest_run["output"] == {"value": "goodbye"}
     assert old_run["workflow_version_number"] == 1
@@ -92,8 +101,12 @@ def test_rejects_workflow_definition_over_total_payload_limit(client, valid_defi
 def test_executes_sequential_workflow_and_persists_run(client, valid_definition):
     workflow = client.post("/api/workflows", json=valid_definition).json()
     response = client.post(f"/api/workflows/{workflow['id']}/runs")
-    assert response.status_code == 201
-    run = response.json()
+    assert response.status_code == 202
+    queued = response.json()
+    assert queued["status"] == "queued"
+    assert queued["steps"] == []
+    run_worker_once(client)
+    run = client.get(f"/api/runs/{queued['id']}").json()
     assert run["status"] == "succeeded"
     assert run["error_category"] is None
     assert run["summary"] == {
@@ -104,6 +117,10 @@ def test_executes_sequential_workflow_and_persists_run(client, valid_definition)
     }
     assert [step["status"] for step in run["steps"]] == ["succeeded", "succeeded"]
     assert run["steps"][1]["output"] == {"value": "HELLO"}
+    assert [step["attempts"][0]["status"] for step in run["steps"]] == [
+        "succeeded",
+        "succeeded",
+    ]
     assert client.get(f"/api/runs/{run['id']}").json() == run
     assert client.get("/api/runs").json()[0] == run
 
@@ -118,7 +135,9 @@ def test_records_failed_step_and_stops_run(client, valid_definition):
         ],
     }
     workflow = client.post("/api/workflows", json=definition).json()
-    run = client.post(f"/api/workflows/{workflow['id']}/runs").json()
+    queued = client.post(f"/api/workflows/{workflow['id']}/runs").json()
+    run_worker_once(client)
+    run = client.get(f"/api/runs/{queued['id']}").json()
     assert run["status"] == "failed"
     assert run["error_category"] == "invalid_input"
     assert run["summary"] == {
@@ -159,6 +178,7 @@ def test_not_found_responses(client):
     assert client.get("/api/workflows/123").status_code == 404
     assert client.post("/api/workflows/123/runs").status_code == 404
     assert client.get("/api/runs/123").status_code == 404
+    assert client.post("/api/runs/123/cancel").status_code == 404
     assert client.get("/api/runs?limit=0").status_code == 422
 
 
@@ -178,6 +198,26 @@ def test_concurrent_run_requests_create_consistent_history(client, valid_definit
             executor.submit(client.post, f"/api/workflows/{workflow['id']}/runs") for _ in range(2)
         ]
     runs = [future.result().json() for future in futures]
-    assert all(run["status"] == "succeeded" for run in runs)
+    assert all(run["status"] == "queued" for run in runs)
     assert len({run["id"] for run in runs}) == 2
     assert len(client.get("/api/runs?limit=2").json()) == 2
+
+
+def test_idempotency_key_returns_same_run_and_creates_one_job(client, valid_definition):
+    workflow = client.post("/api/workflows", json=valid_definition).json()
+    headers = {"Idempotency-Key": "submission-123"}
+    first = client.post(f"/api/workflows/{workflow['id']}/runs", headers=headers)
+    repeated = client.post(f"/api/workflows/{workflow['id']}/runs", headers=headers)
+    assert first.status_code == repeated.status_code == 202
+    assert first.json()["id"] == repeated.json()["id"]
+    assert len(client.get("/api/runs").json()) == 1
+
+
+def test_queued_run_stays_queued_without_a_worker_and_can_be_cancelled(client, valid_definition):
+    workflow = client.post("/api/workflows", json=valid_definition).json()
+    queued = client.post(f"/api/workflows/{workflow['id']}/runs").json()
+    assert client.get(f"/api/runs/{queued['id']}").json()["status"] == "queued"
+    cancelled = client.post(f"/api/runs/{queued['id']}/cancel").json()
+    assert cancelled["status"] == "cancelled"
+    run_worker_once(client)
+    assert client.get(f"/api/runs/{queued['id']}").json()["status"] == "cancelled"

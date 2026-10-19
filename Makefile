@@ -1,4 +1,4 @@
-.PHONY: install migrate migration-current api web test lint format format-check
+.PHONY: install migrate migration-current api worker web test lint format format-check
 
 install:
 	python -m pip install -r requirements.lock
@@ -7,6 +7,9 @@ install:
 
 api:
 	python -m agentflow
+
+worker:
+	python -m agentflow.worker
 
 migrate:
 	alembic upgrade head

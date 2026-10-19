@@ -28,6 +28,16 @@ class WorkflowVersionResponse(BaseModel):
     created_at: datetime
 
 
+class StepAttemptResponse(BaseModel):
+    attempt_number: int
+    status: str
+    output: dict[str, Any] | None
+    error: str | None
+    error_category: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
 class StepRunResponse(BaseModel):
     id: str
     action: str
@@ -38,6 +48,7 @@ class StepRunResponse(BaseModel):
     error_category: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    attempts: list[StepAttemptResponse]
 
 
 class RunResponse(BaseModel):
@@ -53,6 +64,7 @@ class RunResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    cancel_requested_at: datetime | None
     summary: "RunSummary"
     steps: list[StepRunResponse]
 

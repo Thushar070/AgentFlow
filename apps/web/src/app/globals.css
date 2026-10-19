@@ -368,6 +368,21 @@ body {
   background: #f9ece9;
   color: #a34438;
 }
+.run-state.queued,
+.run-state.retrying,
+.run-state.cancel_requested {
+  background: #fff4df;
+  color: #8c6720;
+}
+.run-state.cancelled {
+  background: #edf1ed;
+  color: #627067;
+}
+.cancel-run {
+  margin-left: 8px;
+  padding: 5px 9px;
+  font-size: 10px;
+}
 .step-list {
   margin-top: 10px;
   border-top: 1px solid #edf0ed;
@@ -406,6 +421,12 @@ body {
     monospace;
   overflow-wrap: anywhere;
   text-align: right;
+}
+.attempt-history {
+  flex-basis: 100%;
+  padding: 0 0 7px 25px;
+  color: #8b7560;
+  font-size: 9px;
 }
 .run-error {
   font-size: 11px;

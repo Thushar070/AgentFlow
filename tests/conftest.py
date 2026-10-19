@@ -1,27 +1,23 @@
 import os
-import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import httpx
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+
+import agentflow.main as main_module
+from agentflow.database import get_session
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def client(tmp_path):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-
-    environment = {
-        **os.environ,
-        "DATABASE_URL": f"sqlite:///{tmp_path / 'test.db'}",
-        "CORS_ORIGINS": '["http://localhost:3000"]',
-    }
+def client(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'test.db'}"
+    environment = {**os.environ, "DATABASE_URL": database_url}
     migration = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=ROOT,
@@ -31,46 +27,42 @@ def client(tmp_path):
     )
     if migration.returncode:
         raise RuntimeError(f"Test database migration failed:\n{migration.stderr}")
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "agentflow.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        cwd=ROOT,
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    base_url = f"http://127.0.0.1:{port}"
+
+    engine = create_engine(database_url, connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    def override_get_session():
+        with factory() as session:
+            yield session
+
+    monkeypatch.setattr(main_module, "engine", engine)
+    main_module.app.dependency_overrides[get_session] = override_get_session
     try:
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"AgentFlow API exited during startup with code {process.returncode}"
-                )
-            try:
-                if httpx.get(f"{base_url}/health", timeout=0.5).status_code == 200:
-                    break
-            except httpx.HTTPError:
-                time.sleep(0.1)
-        else:
-            raise RuntimeError("AgentFlow API did not become healthy within 8 seconds")
-        with httpx.Client(base_url=base_url, timeout=3) as api_client:
+        with TestClient(main_module.app, raise_server_exceptions=False) as api_client:
+            api_client.agentflow_database_url = database_url
             yield api_client
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=3)
+        main_module.app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def run_worker_once(client):
+    environment = {**os.environ, "DATABASE_URL": client.agentflow_database_url}
+    result = subprocess.run(
+        [sys.executable, "-m", "agentflow.worker", "--once"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Worker failed ({result.returncode}): {result.stderr}")
 
 
 @pytest.fixture

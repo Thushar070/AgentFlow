@@ -1,19 +1,12 @@
-"""Synchronous execution with one atomic database transaction per run."""
+"""Durable run submission and cancellation services shared by the API."""
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from agentflow.models import (
-    RunStatus,
-    StepRun,
-    StepStatus,
-    Workflow,
-    WorkflowRun,
-    WorkflowVersion,
-    transition_status,
-)
-from agentflow.registry import ActionFailure, run_action
+from agentflow.models import RunStatus, Workflow, WorkflowJob, WorkflowRun, WorkflowVersion
 from agentflow.workflows import validate_definition
 
 
@@ -21,73 +14,50 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-def execute_workflow(session: Session, workflow: Workflow, version: WorkflowVersion) -> WorkflowRun:
-    """Execute one immutable version; commit all run records together."""
+def enqueue_workflow(
+    session: Session,
+    workflow: Workflow,
+    version: WorkflowVersion,
+    *,
+    idempotency_key: str | None = None,
+) -> WorkflowRun:
+    """Persist a queued run and its unique queue row in one database commit."""
     if version.workflow_id != workflow.id:
         raise ValueError("Workflow version does not belong to this workflow")
-    definition = validate_definition(version.definition)
-    timestamp = now()
+    validate_definition(version.definition)
+    if idempotency_key:
+        existing = session.scalar(
+            select(WorkflowRun).where(
+                WorkflowRun.workflow_id == workflow.id,
+                WorkflowRun.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            return existing
+
     run = WorkflowRun(
         workflow_id=workflow.id,
         workflow_version_id=version.id,
-        status=RunStatus.RUNNING,
-        created_at=timestamp,
-        started_at=timestamp,
+        status=RunStatus.QUEUED,
+        created_at=now(),
+        idempotency_key=idempotency_key,
     )
     session.add(run)
-    outputs: dict[str, dict] = {}
-    failed = False
     try:
         session.flush()
-        for order, step in enumerate(definition.steps):
-            inputs = {
-                key: outputs[value["$ref"]]["value"]
-                if isinstance(value, dict) and "$ref" in value
-                else value
-                for key, value in step.inputs.items()
-            }
-            record = StepRun(
-                run_id=run.id,
-                step_id=step.id,
-                step_order=order,
-                action=step.action,
-                status=StepStatus.RUNNING,
-                inputs=inputs,
-                started_at=now(),
-            )
-            session.add(record)
-            session.flush()
-            try:
-                record.output = run_action(step.action, inputs)
-                record.status = transition_status(
-                    record.status, StepStatus.SUCCEEDED, entity="step"
-                )
-                outputs[step.id] = record.output
-            except ActionFailure as exc:
-                record.status = transition_status(record.status, StepStatus.FAILED, entity="step")
-                record.error = exc.safe_message
-                record.error_category = exc.category.value
-                run.error = f"Step '{step.id}' failed: {exc.safe_message}"
-                run.error_category = exc.category.value
-                failed = True
-            except Exception:
-                record.status = transition_status(record.status, StepStatus.FAILED, entity="step")
-                record.error = "Action execution failed."
-                record.error_category = "execution_failed"
-                run.error = f"Step '{step.id}' failed during action execution."
-                run.error_category = "execution_failed"
-                failed = True
-            record.finished_at = now()
-            if failed:
-                break
-
-        target = RunStatus.FAILED if failed else RunStatus.SUCCEEDED
-        run.status = transition_status(run.status, target, entity="run")
-        run.output = None if failed else outputs.get(definition.steps[-1].id)
-        run.finished_at = now()
+        session.add(WorkflowJob(run_id=run.id, available_at=now()))
         session.commit()
-        session.refresh(run)
-        return run
-    except Exception:
+    except IntegrityError:
         session.rollback()
+        if idempotency_key:
+            existing = session.scalar(
+                select(WorkflowRun).where(
+                    WorkflowRun.workflow_id == workflow.id,
+                    WorkflowRun.idempotency_key == idempotency_key,
+                )
+            )
+            if existing is not None:
+                return existing
         raise
+    session.refresh(run)
+    return run

@@ -18,7 +18,9 @@ def test_registry_declares_input_output_permissions_and_timeout_policy():
         assert item["input_schema"]["type"] == "object"
         assert item["output_schema"]["type"] == "object"
         assert item["required_permissions"] == []
-        assert item["timeout_policy"] == TimeoutPolicy.BOUNDED_LOCAL.value
+        assert item["timeout_policy"] == TimeoutPolicy.PROCESS_INTERRUPTIBLE.value
+        assert item["timeout_seconds"] == 5
+        assert item["max_attempts"] == 3
 
 
 def test_action_output_is_validated(monkeypatch):

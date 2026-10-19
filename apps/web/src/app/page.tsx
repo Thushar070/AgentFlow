@@ -36,6 +36,14 @@ type StepRun = {
   output?: Record<string, unknown> | null;
   error?: string | null;
   error_category?: string | null;
+  attempts: {
+    attempt_number: number;
+    status: string;
+    error?: string | null;
+    error_category?: string | null;
+    started_at: string;
+    finished_at?: string | null;
+  }[];
 };
 type Run = {
   id: number;
@@ -52,6 +60,13 @@ type Run = {
   };
   steps: StepRun[];
 };
+
+const activeRunStatuses = new Set([
+  "queued",
+  "running",
+  "retrying",
+  "cancel_requested",
+]);
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
@@ -134,6 +149,22 @@ export default function Home() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!runs.some((run) => activeRunStatuses.has(run.status))) return;
+    const interval = window.setInterval(() => {
+      api<Run[]>("/api/runs?limit=20")
+        .then(setRuns)
+        .catch((cause: unknown) => {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not refresh workflow status.",
+          );
+        });
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [runs]);
+
   async function createWorkflow(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -167,6 +198,25 @@ export default function Home() {
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Workflow could not be run.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelRun(id: number) {
+    setBusy(true);
+    try {
+      const updated = await api<Run>(`/api/runs/${id}/cancel`, {
+        method: "POST",
+      });
+      setRuns((current) =>
+        current.map((run) => (run.id === id ? updated : run)),
+      );
+      setError("");
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Run could not be cancelled.",
       );
     } finally {
       setBusy(false);
@@ -306,8 +356,8 @@ export default function Home() {
         </div>
         {runs.length === 0 ? (
           <div className="empty compact">
-            Completed and failed runs will appear here with step-by-step
-            results.
+            Queued, completed, failed, and cancelled runs appear here with
+            step-by-step results.
           </div>
         ) : (
           <div className="run-list">
@@ -323,6 +373,16 @@ export default function Home() {
                       ? new Date(run.started_at).toLocaleString()
                       : "Just now"}
                   </span>
+                  {activeRunStatuses.has(run.status) &&
+                    run.status !== "cancel_requested" && (
+                      <button
+                        className="button secondary cancel-run"
+                        disabled={busy}
+                        onClick={() => void cancelRun(run.id)}
+                      >
+                        Cancel
+                      </button>
+                    )}
                 </div>
                 <p className="run-summary">
                   {run.summary.succeeded_steps} succeeded ·{" "}
@@ -348,6 +408,20 @@ export default function Home() {
                             ? JSON.stringify(step.output)
                             : step.status)}
                       </span>
+                      {step.attempts.length > 1 && (
+                        <small className="attempt-history">
+                          {step.attempts
+                            .map(
+                              (attempt) =>
+                                `#${attempt.attempt_number} ${attempt.status}${
+                                  attempt.error_category
+                                    ? ` (${attempt.error_category})`
+                                    : ""
+                                }`,
+                            )
+                            .join(" · ")}
+                        </small>
+                      )}
                     </div>
                   ))}
                 </div>
