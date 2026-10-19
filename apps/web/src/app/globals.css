@@ -1,0 +1,494 @@
+:root {
+  --ink: #18231f;
+  --muted: #737d77;
+  --line: #e5e9e5;
+  --paper: #f7f8f5;
+  --green: #237c59;
+  --green-dark: #155c40;
+  --mint: #e9f3ed;
+  --orange: #d78a4d;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "DM Sans", sans-serif;
+}
+.shell {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 0 40px;
+}
+.topbar {
+  height: 76px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  text-decoration: none;
+  font:
+    800 17px Manrope,
+    sans-serif;
+  letter-spacing: -0.6px;
+}
+.brand-mark {
+  width: 29px;
+  height: 29px;
+  border-radius: 9px;
+  background: var(--green);
+  color: white;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.connection {
+  font:
+    12px "DM Mono",
+    monospace;
+  color: var(--muted);
+}
+.connection i,
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #aab4ad;
+  margin-right: 7px;
+}
+.connection.online i,
+.status-dot {
+  background: #47a977;
+  box-shadow: 0 0 0 3px #e5f1e9;
+}
+.avatar {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  background: #e9ece8;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  color: #68736c;
+}
+.intro {
+  padding: 74px 0 55px;
+  max-width: 660px;
+}
+.eyebrow {
+  font:
+    500 10px "DM Mono",
+    monospace;
+  letter-spacing: 1.5px;
+  color: var(--green);
+}
+.spark {
+  font-size: 15px;
+  vertical-align: -1px;
+  margin-right: 6px;
+}
+.intro h1 {
+  font:
+    700 clamp(43px, 6vw, 64px)/1.05 Manrope,
+    sans-serif;
+  letter-spacing: -3.2px;
+  margin: 21px 0 15px;
+}
+.intro h1 em {
+  color: var(--green);
+  font-style: normal;
+}
+.intro > p {
+  max-width: 460px;
+  color: #66716a;
+  font-size: 16px;
+  line-height: 1.65;
+  margin: 0;
+}
+.intro-meta {
+  margin-top: 22px;
+  color: #6d776f;
+  font:
+    11px "DM Mono",
+    monospace;
+}
+.intro-meta b {
+  padding: 0 9px;
+  color: #bdc4be;
+  font-weight: 400;
+}
+.workspace,
+.builder,
+.runs-section {
+  border-top: 1px solid var(--line);
+  padding: 31px 0 34px;
+}
+.section-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.muted {
+  color: #849087;
+}
+.section-head h2 {
+  font:
+    700 21px Manrope,
+    sans-serif;
+  letter-spacing: -0.6px;
+  margin: 7px 0 0;
+}
+.count,
+.version {
+  font:
+    11px "DM Mono",
+    monospace;
+  color: #78827b;
+}
+.version {
+  border: 1px solid var(--line);
+  padding: 6px 9px;
+  border-radius: 5px;
+  background: #fff;
+}
+.empty {
+  border: 1px dashed #d9dfd9;
+  border-radius: 9px;
+  min-height: 133px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #758078;
+  text-align: center;
+  padding: 22px;
+}
+.empty strong {
+  color: #354139;
+  font-size: 14px;
+  margin-top: 9px;
+}
+.empty p {
+  font-size: 12px;
+  margin: 5px 0 0;
+}
+.empty-icon {
+  font-size: 18px;
+  color: var(--green);
+}
+.workflow-list,
+.run-list {
+  display: grid;
+  gap: 10px;
+}
+.workflow-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 9px;
+  padding: 15px 17px;
+}
+.flow-icon {
+  width: 37px;
+  height: 37px;
+  border-radius: 8px;
+  background: #edf4ef;
+  color: var(--green);
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+}
+.workflow-info {
+  flex: 1;
+}
+.workflow-info h3 {
+  font-size: 14px;
+  margin: 0 0 5px;
+}
+.workflow-info p {
+  font:
+    10px "DM Mono",
+    monospace;
+  color: #89928c;
+  margin: 0;
+}
+.workflow-info p span {
+  margin: 0 6px;
+  color: #c0c8c1;
+}
+.button {
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0 13px;
+  font:
+    600 11px "DM Sans",
+    sans-serif;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border 0.15s;
+}
+.button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.primary {
+  background: var(--green);
+  color: white;
+}
+.primary:hover:not(:disabled) {
+  background: var(--green-dark);
+}
+.button span {
+  font-size: 14px;
+  margin-left: 7px;
+}
+.builder {
+  padding-top: 29px;
+}
+.section-description {
+  font-size: 12px;
+  color: #738078;
+  margin: -8px 0 18px;
+}
+.builder label {
+  display: block;
+  font:
+    11px "DM Mono",
+    monospace;
+  color: #657069;
+  margin-bottom: 8px;
+}
+.builder textarea {
+  display: block;
+  width: 100%;
+  height: 224px;
+  resize: vertical;
+  border: 1px solid #dfe5df;
+  background: #fff;
+  border-radius: 8px;
+  padding: 14px;
+  color: #314238;
+  font:
+    12px/1.65 "DM Mono",
+    monospace;
+  outline: none;
+}
+.builder textarea:focus {
+  border-color: #7eaf93;
+  box-shadow: 0 0 0 3px #e5f1e9;
+}
+.form-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 11px;
+}
+.form-footer > span {
+  font-size: 10px;
+  color: #879089;
+}
+.form-footer code,
+.step-row code {
+  font:
+    10px "DM Mono",
+    monospace;
+  background: #edf1ed;
+  color: #51745e;
+  padding: 3px 5px;
+  border-radius: 3px;
+}
+.runs-section {
+  padding-bottom: 30px;
+}
+.empty.compact {
+  min-height: 72px;
+  font-size: 12px;
+}
+.run-card {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 13px 15px;
+}
+.run-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.run-title strong {
+  font-size: 12px;
+}
+.run-time {
+  margin-left: auto;
+  font:
+    10px "DM Mono",
+    monospace;
+  color: #929b94;
+}
+.run-state {
+  border-radius: 4px;
+  padding: 4px 7px;
+  text-transform: uppercase;
+  font:
+    9px "DM Mono",
+    monospace;
+  background: #edf1ed;
+  color: #627067;
+}
+.run-state.succeeded {
+  background: #e8f4ec;
+  color: #28744e;
+}
+.run-state.failed {
+  background: #f9ece9;
+  color: #a34438;
+}
+.step-list {
+  margin-top: 10px;
+  border-top: 1px solid #edf0ed;
+}
+.step-row {
+  min-height: 37px;
+  border-bottom: 1px solid #f0f2f0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+}
+.step-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  background: #e8f4ec;
+  color: #28744e;
+}
+.step-check.failed {
+  background: #f9ece9;
+  color: #a34438;
+}
+.step-name {
+  font-weight: 600;
+  min-width: 65px;
+}
+.step-output {
+  margin-left: auto;
+  color: #68746c;
+  font:
+    10px "DM Mono",
+    monospace;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.run-error {
+  font-size: 11px;
+  color: #a34438;
+  margin: 12px 0 0;
+}
+footer {
+  border-top: 1px solid var(--line);
+  padding: 20px 0 30px;
+  font-size: 10px;
+  color: #89928c;
+}
+footer span {
+  color: #53645a;
+  font-weight: 700;
+  margin-right: 8px;
+}
+.alert {
+  border: 1px solid #edd4cb;
+  background: #fff9f6;
+  border-radius: 8px;
+  padding: 13px 15px;
+  margin: -29px 0 25px;
+}
+.alert > span {
+  font-size: 12px;
+  font-weight: 700;
+  color: #934634;
+}
+.alert p {
+  font-size: 11px;
+  color: #7d5147;
+  overflow-wrap: anywhere;
+}
+.alert button {
+  border: 0;
+  background: transparent;
+  color: #286c4d;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+@media (max-width: 640px) {
+  .shell {
+    padding: 0 20px;
+  }
+  .intro {
+    padding: 52px 0 39px;
+  }
+  .intro h1 {
+    letter-spacing: -2.4px;
+  }
+  .intro > p {
+    font-size: 14px;
+  }
+  .section-head h2 {
+    font-size: 19px;
+  }
+  .workflow-card {
+    gap: 10px;
+    padding: 12px;
+  }
+  .run-button {
+    padding: 0 9px;
+    font-size: 10px;
+  }
+  .workflow-info p {
+    font-size: 9px;
+  }
+  .form-footer {
+    align-items: flex-start;
+    gap: 12px;
+    flex-direction: column;
+  }
+  .form-footer .button {
+    align-self: flex-end;
+  }
+  .step-row {
+    gap: 6px;
+  }
+  .step-output {
+    max-width: 42%;
+  }
+  .run-time {
+    font-size: 9px;
+  }
+  .topbar {
+    height: 65px;
+  }
+}
