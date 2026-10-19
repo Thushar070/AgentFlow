@@ -275,18 +275,18 @@ The following phase sequence reflects the fresh-project authorization. Phase 1 e
 
 **Tasks:**
 - Implement domain models and migrations using the verified stack.
-- Implement workflow create/read/update/list/archive or delete behavior as approved, including ownership checks.
+- Implement workflow create/read/update/list behavior with immutable definition versions. Ownership checks remain deferred with authentication to Phase 5.
 - Implement workflow-definition schema validation and versioning rules.
 - Enforce allowed transitions and data-integrity constraints.
 - Implement API contracts and request/response error behavior.
-- Add authentication/authorization integration following the verified security design.
+- Authentication and authorization are explicitly deferred to Phase 5; Phase 2 remains a local single-user development API.
 - Create seed/demo data only when suitable, clearly separating development fixtures from production data.
 
 **Deliverables:** Persisted workflow definitions; migration scripts; validated API endpoints; unit/integration tests; updated setup/API documentation.
 
 **Acceptance criteria:**
 - Valid definitions persist and can be retrieved; invalid or oversized definitions are rejected with safe, useful errors.
-- Unauthorized users cannot read or modify protected workflow resources.
+- API response fields used by the existing dashboard remain compatible; authentication is deferred and the local API is not a shared service.
 - Updates/versioning do not silently corrupt already-created runs or published definitions.
 - Migrations work on a clean database and the supported upgrade path.
 - No AI dependency is required for core workflow management.

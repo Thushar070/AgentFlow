@@ -22,6 +22,15 @@ def client(tmp_path):
         "DATABASE_URL": f"sqlite:///{tmp_path / 'test.db'}",
         "CORS_ORIGINS": '["http://localhost:3000"]',
     }
+    migration = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    if migration.returncode:
+        raise RuntimeError(f"Test database migration failed:\n{migration.stderr}")
     process = subprocess.Popen(
         [
             sys.executable,

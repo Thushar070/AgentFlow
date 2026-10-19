@@ -7,6 +7,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+agentflow.db-*
+*.db-journal
+*.sqlite3-journal
+*.db.*
+*.sqlite3.*
 *.py[cod]
 *.db
 *.sqlite3

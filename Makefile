@@ -1,4 +1,4 @@
-.PHONY: install api web test lint format format-check
+.PHONY: install migrate migration-current api web test lint format format-check
 
 install:
 	python -m pip install -r requirements.lock
@@ -8,6 +8,12 @@ install:
 api:
 	python -m agentflow
 
+migrate:
+	alembic upgrade head
+
+migration-current:
+	alembic current
+
 web:
 	cd apps/web && npm run dev
 
@@ -15,13 +21,13 @@ test:
 	pytest
 
 lint:
-	ruff check agentflow tests
+	ruff check agentflow tests migrations
 	cd apps/web && npm run lint && npm run typecheck
 
 format:
-	ruff format agentflow tests
+	ruff format agentflow tests migrations
 	cd apps/web && npm run format
 
 format-check:
-	ruff format --check agentflow tests
+	ruff format --check agentflow tests migrations
 	cd apps/web && npm run format:check

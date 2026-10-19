@@ -14,6 +14,7 @@ python -m venv .venv
 python -m pip install -r requirements.lock
 python -m pip install --no-build-isolation --no-deps -e .
 cd apps/web && npm ci && cd ../..
+alembic upgrade head
 ```
 
 Start the API and dashboard in separate terminals:
@@ -26,7 +27,7 @@ python -m agentflow
 cd apps/web && npm run dev
 ```
 
-Open <http://localhost:3000>. The API health endpoint is <http://localhost:8000/health>; interactive API docs are at <http://localhost:8000/docs>. The API creates `agentflow.db` on first startup. Set `DATABASE_URL` to a SQLAlchemy-supported URL to use another database.
+Open <http://localhost:3000>. The API health endpoint is <http://localhost:8000/health>; interactive API docs are at <http://localhost:8000/docs>. Run `alembic upgrade head` (or `make migrate`) before starting the API. Application startup checks the current schema revision and fails with a migration command if it is behind; it does not create or reset database tables. Alembic and the API read the same `DATABASE_URL` setting.
 
 ## Workflow format
 
@@ -43,7 +44,11 @@ Definitions use schema version 1 and contain 1–50 uniquely identified steps. I
 }
 ```
 
-Registered actions: `set_value`, `uppercase`, and `append`. Unknown actions, extra fields, malformed references, duplicate IDs, invalid inputs, and oversized step lists are rejected. The engine executes steps sequentially in the API request and persists each step outcome and run status. A failed step stops the run. This first version does not queue work, retry, cancel, authenticate users, or isolate tenants; do not expose it as a shared production service.
+Registered actions: `set_value`, `uppercase`, and `append`. Unknown actions, extra fields, malformed references, duplicate IDs, invalid inputs, and oversized step lists are rejected. Each workflow has immutable numbered definition versions. `POST /api/workflows/{id}/runs` executes the current version; `POST /api/workflows/{id}/versions/{version}/runs` explicitly executes an older version. Workflow reads retain the compatible top-level `definition` field. `PUT /api/workflows/{id}` creates a new version rather than changing definitions attached to prior runs. A run pins its workflow version and persists the execution and all step outcomes in one transaction. A failed action is recorded as a failed run and stops later steps; database commit failures roll back that run. Execution remains synchronous in the API request. This version does not queue work, retry, cancel, authenticate users, or isolate tenants; do not expose it as a shared production service.
+
+### Database migration
+
+Alembic manages schema changes. For a fresh SQLite database run `alembic upgrade head`. The Phase 1 schema is upgraded in place while preserving its workflows and execution history. Back up the database file before upgrading an existing installation, for example `cp agentflow.db agentflow.db.bak`; migrations never delete or reset the database. The current revision is `70b823ceda15` (following `0432ed0b773b`). Downgrade is intentionally disabled because converting immutable version history back to the Phase 1 schema would discard data.
 
 ## Checks
 
@@ -56,4 +61,4 @@ cd apps/web && npm run lint && npm run typecheck && npm run format:check && npm 
 
 ## Architecture and next steps
 
-`agentflow/workflows.py` owns the definition contract, `registry.py` the fixed action catalog, `execution.py` the sequential coordinator, `models.py` persistent records, and `main.py` the HTTP boundary. The Next.js dashboard talks to the API only. SQLAlchemy isolates persistence behind `DATABASE_URL`; SQLite keeps local development service-free. The first version uses SQLAlchemy metadata creation rather than Alembic migrations; migration management belongs in the reliability phase before schema evolution is needed. Background jobs, authentication/authorization, audit events, advanced retry/recovery, and AI workflow proposals remain future work.
+`agentflow/workflows.py` owns the definition contract, `registry.py` the fixed action catalog, `execution.py` the sequential coordinator, `models.py` persistent records, and `main.py` the HTTP boundary. `migrations/versions/` contains the Alembic schema history. The Next.js dashboard talks to the API only. SQLAlchemy isolates persistence behind `DATABASE_URL`; SQLite keeps local development service-free. Background jobs, authentication/authorization, audit events, advanced retry/recovery, and AI workflow proposals remain future work.

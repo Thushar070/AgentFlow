@@ -18,6 +18,9 @@ class WorkflowDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int = Field(default=1, ge=1, le=1)
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    description: Annotated[
+        str | None, StringConstraints(strip_whitespace=True, max_length=1000)
+    ] = None
     steps: list[StepDefinition] = Field(min_length=1, max_length=50)
 
     @model_validator(mode="after")

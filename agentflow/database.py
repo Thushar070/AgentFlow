@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -20,7 +20,16 @@ def _make_engine():
         options["connect_args"] = {"check_same_thread": False}
     if url in {"sqlite://", "sqlite:///:memory:"}:
         options["poolclass"] = StaticPool
-    return create_engine(url, **options)
+    result = create_engine(url, **options)
+    if url.startswith("sqlite"):
+
+        @event.listens_for(result, "connect")
+        def enable_foreign_keys(connection, _record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return result
 
 
 engine = _make_engine()
