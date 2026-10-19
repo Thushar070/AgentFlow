@@ -34,7 +34,7 @@
 
 ### Limitations and next task
 
-- Synchronous API execution can hold a request open; do not expose this initial slice as a shared production service. No auth/tenant isolation, background queue, timeout/retry/cancel/recovery policy, Alembic migration system, or AI adapter exists yet.
+- Synchronous API execution can hold a request open; do not expose this initial slice as a shared production service. No auth/tenant isolation, background queue, hard timeout enforcement, retries, cancellation/recovery, Alembic migration system, or AI adapter existed at Phase 1 completion.
 - Docker socket access prevented verification against PostgreSQL/Redis. SQLite is the tested local path; SQLAlchemy allows a database URL to be configured, but production compatibility has not been tested.
 - Browser UI flows could not be exercised because no browser surface was available. The implementation was checked via live HTTP, API-level workflows, and production build.
 - **Next:** Phase 2 should formalize workflow/persistence domain contracts and introduce schema migrations before expanding execution reliability features.
@@ -46,7 +46,7 @@
 
 ## Phase 2 — Persistence Architecture and Database Migrations
 
-**Status:** BLOCKED (implementation and acceptance checks pass; required local commit is blocked by read-only Git metadata)
+**Status:** COMPLETE (implementation and acceptance checks pass; Phase 2 changes are present in the locally observed commit `e0dad172202b7a431a8845f170d9c7eea63a5cc0`)
 
 ### Initial findings and safety
 
@@ -94,12 +94,57 @@
 
 ### Remaining gate and limitations
 
-- The Phase 2 implementation acceptance criteria pass. The phase remains **BLOCKED** at repository delivery: `docs/plan.md` §8.2 requires a focused local commit at phase completion, but `.git` is mounted read-only. Do not begin Phase 3 until the repository Git metadata is writable and the phase changes can be staged, reviewed, and committed.
+- The Phase 2 implementation acceptance criteria passed. At the time of the Phase 2 audit, repository delivery was blocked by the read-only `.git` mount. During the later Phase 3 audit, commit `e0dad172202b7a431a8845f170d9c7eea63a5cc0` appeared as a child of the Phase 1 commit and contains the Phase 2 persistence changes. This session did not create that commit or contact the remote; see the Git delivery addendum below.
 - Only SQLite migration behavior is supported and tested. PostgreSQL is not introduced. Migrations do not delete/reset data; make a separate backup before upgrades. Automatic downgrade is intentionally disabled.
 - No authentication, background worker, retry, cancellation, or AI work was added.
 
 ### Git delivery
 
-- Phase 1 commit remains `deaf11485f89cc2df05024443881b0dbcd7a74ea`.
-- Phase 2 changes are uncommitted. No push was attempted or authorized.
-- **Git blocker:** Git metadata is read-only in this session. `git restore -- apps/web/next-env.d.ts` failed with `fatal: Unable to create '.../.git/index.lock': Read-only file system`. The generated file was restored directly to its committed contents; no commit or push was attempted.
+- Phase 1 commit `deaf11485f89cc2df05024443881b0dbcd7a74ea` remains an ancestor. The Phase 2 audit initially observed this commit at `HEAD`; the later Phase 3 audit observed `e0dad172202b7a431a8845f170d9c7eea63a5cc0` at both `HEAD` and the local `origin/main` tracking ref. That later commit contains the Phase 2 persistence changes.
+- The Phase 2 audit did not create a commit or push. This Phase 3 session also did not create the newly observed commit, fetch, or contact the remote. The local `origin/main` ref is not evidence that GitHub was queried or updated.
+- **Git blocker at the Phase 2 audit:** Git metadata was read-only. `git restore -- apps/web/next-env.d.ts` failed with `fatal: Unable to create '.../.git/index.lock': Read-only file system`. The generated file was restored directly to its committed contents.
+
+## Phase 3 — Action Registry and Deterministic Execution Engine
+
+**Status:** BLOCKED (implementation and verification pass; local commit is blocked by the read-only Git mount)
+
+### Scope and implementation
+
+- Followed Phase 3 in `docs/plan.md`: explicit action contracts and metadata; deterministic execution, eligibility, state transitions and summaries; bounded safe actions; persisted outcomes; and regression, failure, repeated-run and concurrency checks. The owner explicitly authorized this local Phase 3 work while the Phase 2 Git-delivery blocker remained open.
+- Replaced tuple registry entries with `ActionSpec` declarations for input/output schemas, required permissions, and timeout policy. The `/api/actions` catalog exposes these fields. Built-in actions require no permissions; permission checks fail closed for actions that declare a requirement.
+- Added bounded output validation and classified safe failures: `unknown_action`, `invalid_input`, `invalid_output`, `permission_denied`, and `execution_failed`. Raw handler exceptions are not included in API errors.
+- Added nullable run/step `error_category` fields with database check constraints in Alembic revision `d9156bc2a041` (`70b823ceda15` parent). Historical rows retain a null category rather than receiving a guessed classification.
+- Kept the synchronous coordinator and Phase 2 transaction boundary. Workflow definitions still permit at most 50 ordered steps with backward-only references; cycles/self/forward references are rejected. Added a 512 KiB total definition bound. Run responses now include derived counts for total, succeeded, failed, and not-started steps; the dashboard displays them and exposes failure categories.
+- Timeout policy is explicit but not a hard wall-clock interrupt: current handlers are bounded local deterministic operations with bounded inputs/step counts and no external I/O. Phase 1 did not record a numeric duration limit; hard timeouts, cancellation, retries, and worker recovery remain Phase 4 scope. No worker or external action was introduced.
+
+### Verification evidence
+
+- **Passed:** `.venv/bin/python -m pytest -q` — 25 passed. Coverage includes fresh/Phase 1/Phase 2 migration paths, repeat upgrades, preservation, integrity, transactional rollback, registry input/output/permission/error contracts, payload bounds, workflow success/failure summaries, repeated runs and concurrent run requests.
+- **Passed:** `.venv/bin/ruff check agentflow tests migrations` and `.venv/bin/ruff format --check agentflow tests migrations`.
+- **Passed:** `npm run lint`, `npm run typecheck`, `npm run format:check`, and standalone `npm run build`; the build prerendered `/` and `/_not-found`. The fully chained lint/typecheck/format/build command twice failed at Next.js `--showConfig` output parsing although the individual checks and standalone build passed. The cause was not established; this sequencing failure remains noted.
+- **Passed:** `alembic check` on a fresh Phase 3 database reported no new operations. Fresh database migration reached `d9156bc2a041`.
+- **Passed:** Actual copies of the saved Phase 1 backup and a populated Phase 2 audit database upgraded twice through `d9156bc2a041`. All prior workflow/version/run/step fields and results compared equal; historical categories remained null; foreign-key checks were clean. Neither source DB was modified.
+- **Passed (Chrome):** On `/`, created and ran a two-step successful workflow; the UI showed `2 succeeded · 0 failed · 0 not started`. Then created a workflow that passed integer output into `uppercase`; the UI showed a failed run, `1 succeeded · 1 failed · 1 not started`, `invalid_input`, and the safe step error. No browser console inspection capability was available.
+- **Passed:** `git diff --check`.
+
+### Remaining gate and limitations
+
+- Functional Phase 3 requirements and verification pass. Phase 3 delivery remains **BLOCKED** because `.git` is mounted read-only and its changes are not committed. A Phase 2 commit appeared during this audit, but this session did not create it or query the remote. Do not begin Phase 4 until Phase 3 can be reviewed and committed according to `docs/plan.md` §8.2.
+- The timeout policy does not terminate a running handler. All shipped handlers are local/pure and have bounded input and workflow sizes. No retries, cancellation, worker, or external side effects are implemented.
+- The Phase 2 implementation is present in the observed `HEAD` commit. Only Phase 3 changes remain in the working tree and need review/commit when Git metadata is writable.
+
+### Git delivery
+
+- Branch `main`; at final audit, `HEAD` and the local `origin/main` tracking ref both resolve to `e0dad172202b7a431a8845f170d9c7eea63a5cc0`, whose parent is the Phase 1 commit. This commit contains Phase 2 changes; this session did not create it, fetch, or contact the remote.
+- Phase 3 changes remain unstaged and uncommitted. `.git` is mounted `ro`; no `.git/index.lock` or active Git process was found. No push was attempted.
+
+### Final audit and delivery readiness — 2026-10-19
+
+- **Diff review:** Reviewed all staged, unstaged, and untracked state. There are no staged files. The modified files and two untracked files are limited to the Phase 3 implementation, its tests, migration, README, and progress tracker. No environment file, database, cache, build output, or credential-bearing file is part of the diff. `apps/web/next-env.d.ts` has no diff. The existing `/tmp/agentflow-phase2-pre-migration.db` backup is present and was not modified.
+- **Migration review:** `d9156bc2a041` declares `70b823ceda15` as its parent and adds only nullable error-category columns plus checks. Historical rows retain null categories. The prior Phase 2 revision remains unchanged. Fresh and populated-copy migration results were recorded above; migrations were not run against the working database during this audit.
+- **Documentation fix:** README's current-revision statement incorrectly stopped at `70b823ceda15`; it now identifies `d9156bc2a041` as current and lists both parent revisions.
+- **Frontend command issue:** The reported combined command was `npm run lint && npm run typecheck && npm run format:check && npm run build` from `apps/web`. The recorded failure was `Could not parse output from TypeScript's --showConfig.` Separate lint, typecheck, formatting, and a standalone build were recorded passing, but this audit did not rerun them. Since the error mentions Next.js parsing TypeScript configuration and the separately invoked checks do not use that Next.js build path, `npm run build` is the likely failing subcommand; the prior command output does not conclusively establish the failing command. Root cause (wrapper, tool/output parsing, or application configuration) remains unresolved. Do not label it a proven tooling-only issue.
+- **Git diagnosis:** `findmnt` reports `.git` on `/dev/nvme0n1p8[/Projects/AgentFlow/.git]`, ext4 with `ro,nosuid,nodev,relatime`. `.git` and `.git/index` are owned by `billy` and have owner write bits; no index lock or active Git process exists. The mount itself prevents writes, so permissions were not changed and no Git write was retried. A read-only `git ls-remote origin refs/heads/main` attempt failed with `Could not resolve host: github.com`; remote branch state is unknown. No commit or push was attempted.
+- **Checks run during this audit:** Inspected status, branch, recent commits, complete tracked diffs, untracked migration/test files, migration ancestry, README/progress, backup presence, Next.js generated-file diff, mount/ownership/lock/process state, and remote reachability. `git diff --check` passed after the README correction. Automated tests, frontend checks, migrations, and browser flows were not rerun because the implementation was unchanged in this audit; their prior results are recorded in the verification section above.
+- **Acceptance and status:** Deterministic execution, registered-action/input validation, dependency and transition enforcement, persisted outcomes, rejection paths, migration safety, and browser behavior have prior passing evidence. This audit did not invalidate those results. Phase 3 remains **BLOCKED**, not complete, because the required local delivery commit could not be created. The README/progress-only audit edits also remain uncommitted.
+- **Recovery:** Preserve this checkout. When a writable filesystem is available, make a copy of the repository including `.git` and the current working files, verify the copied `HEAD` is `e0dad172202b7a431a8845f170d9c7eea63a5cc0`, compare its Phase 3 diff and untracked files with this checkout, then stage only the reviewed Phase 3 paths and commit there. Do not push without explicit authorization. Do not remount or move the current repository as part of this audit.

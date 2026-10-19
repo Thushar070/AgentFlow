@@ -1,10 +1,18 @@
+from concurrent.futures import ThreadPoolExecutor
+
+from agentflow.workflows import MAX_DEFINITION_BYTES
+
+
 def test_health_and_action_catalog(client):
     assert client.get("/health").json()["status"] == "ok"
-    assert {item["id"] for item in client.get("/api/actions").json()} == {
+    catalog = {item["id"]: item for item in client.get("/api/actions").json()}
+    assert set(catalog) == {
         "set_value",
         "uppercase",
         "append",
     }
+    assert catalog["uppercase"]["output_schema"]["type"] == "object"
+    assert catalog["uppercase"]["required_permissions"] == []
 
 
 def test_create_and_read_workflow(client, valid_definition):
@@ -65,12 +73,35 @@ def test_rejects_unknown_actions_and_invalid_workflow_shapes(client, valid_defin
     assert client.post("/api/workflows", json=oversized).status_code == 422
 
 
+def test_rejects_workflow_definition_over_total_payload_limit(client, valid_definition):
+    oversized = {
+        **valid_definition,
+        "steps": [
+            {
+                "id": "payload",
+                "action": "set_value",
+                "inputs": {"value": "x" * (MAX_DEFINITION_BYTES + 1)},
+            }
+        ],
+    }
+    response = client.post("/api/workflows", json=oversized)
+    assert response.status_code == 422
+    assert "workflow definition exceeds" in response.text
+
+
 def test_executes_sequential_workflow_and_persists_run(client, valid_definition):
     workflow = client.post("/api/workflows", json=valid_definition).json()
     response = client.post(f"/api/workflows/{workflow['id']}/runs")
     assert response.status_code == 201
     run = response.json()
     assert run["status"] == "succeeded"
+    assert run["error_category"] is None
+    assert run["summary"] == {
+        "total_steps": 2,
+        "succeeded_steps": 2,
+        "failed_steps": 0,
+        "not_started_steps": 0,
+    }
     assert [step["status"] for step in run["steps"]] == ["succeeded", "succeeded"]
     assert run["steps"][1]["output"] == {"value": "HELLO"}
     assert client.get(f"/api/runs/{run['id']}").json() == run
@@ -89,7 +120,15 @@ def test_records_failed_step_and_stops_run(client, valid_definition):
     workflow = client.post("/api/workflows", json=definition).json()
     run = client.post(f"/api/workflows/{workflow['id']}/runs").json()
     assert run["status"] == "failed"
+    assert run["error_category"] == "invalid_input"
+    assert run["summary"] == {
+        "total_steps": 3,
+        "succeeded_steps": 1,
+        "failed_steps": 1,
+        "not_started_steps": 1,
+    }
     assert [step["status"] for step in run["steps"]] == ["succeeded", "failed"]
+    assert run["steps"][1]["error_category"] == "invalid_input"
     assert "registered action schema" in run["steps"][1]["error"]
     assert "42" not in run["steps"][1]["error"]
     assert run["output"] is None
@@ -104,6 +143,12 @@ def test_rejects_duplicate_ids_forward_references_and_extra_fields(client, valid
     invalid_cases = [
         {**valid_definition, "steps": [valid_definition["steps"][0]] * 2},
         forward_reference,
+        {
+            **valid_definition,
+            "steps": [
+                {"id": "first", "action": "uppercase", "inputs": {"value": {"$ref": "first"}}}
+            ],
+        },
         {**valid_definition, "unexpected": True},
     ]
     for invalid in invalid_cases:
@@ -115,3 +160,24 @@ def test_not_found_responses(client):
     assert client.post("/api/workflows/123/runs").status_code == 404
     assert client.get("/api/runs/123").status_code == 404
     assert client.get("/api/runs?limit=0").status_code == 422
+
+
+def test_repeated_run_requests_create_distinct_persisted_runs(client, valid_definition):
+    workflow = client.post("/api/workflows", json=valid_definition).json()
+    first = client.post(f"/api/workflows/{workflow['id']}/runs").json()
+    second = client.post(f"/api/workflows/{workflow['id']}/runs").json()
+    assert first["id"] != second["id"]
+    history = client.get("/api/runs?limit=2").json()
+    assert [item["id"] for item in history] == [second["id"], first["id"]]
+
+
+def test_concurrent_run_requests_create_consistent_history(client, valid_definition):
+    workflow = client.post("/api/workflows", json=valid_definition).json()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(client.post, f"/api/workflows/{workflow['id']}/runs") for _ in range(2)
+        ]
+    runs = [future.result().json() for future in futures]
+    assert all(run["status"] == "succeeded" for run in runs)
+    assert len({run["id"] for run in runs}) == 2
+    assert len(client.get("/api/runs?limit=2").json()) == 2

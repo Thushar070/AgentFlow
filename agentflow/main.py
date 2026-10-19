@@ -108,6 +108,9 @@ def serialize_workflow(workflow: Workflow) -> dict:
 
 
 def serialize_run(run: WorkflowRun) -> dict:
+    total_steps = len(run.workflow_version.definition.get("steps", []))
+    succeeded_steps = sum(step.status == "succeeded" for step in run.steps)
+    failed_steps = sum(step.status == "failed" for step in run.steps)
     return {
         "id": run.id,
         "workflow_id": run.workflow_id,
@@ -117,9 +120,16 @@ def serialize_run(run: WorkflowRun) -> dict:
         "input": run.input,
         "output": run.output,
         "error": run.error,
+        "error_category": run.error_category,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
+        "summary": {
+            "total_steps": total_steps,
+            "succeeded_steps": succeeded_steps,
+            "failed_steps": failed_steps,
+            "not_started_steps": max(total_steps - len(run.steps), 0),
+        },
         "steps": [
             {
                 "id": step.step_id,
@@ -128,6 +138,7 @@ def serialize_run(run: WorkflowRun) -> dict:
                 "inputs": step.inputs,
                 "output": step.output,
                 "error": step.error,
+                "error_category": step.error_category,
                 "started_at": step.started_at,
                 "finished_at": step.finished_at,
             }

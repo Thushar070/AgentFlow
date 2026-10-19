@@ -338,6 +338,11 @@ body {
 .run-title strong {
   font-size: 12px;
 }
+.run-summary {
+  color: #737d77;
+  font-size: 10px;
+  margin: 8px 0 0;
+}
 .run-time {
   margin-left: auto;
   font:

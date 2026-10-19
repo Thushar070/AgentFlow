@@ -16,20 +16,22 @@ from agentflow.models import (
     Base,
     InvalidTransition,
     RunStatus,
+    StepRun,
     Workflow,
     WorkflowRun,
     WorkflowVersion,
     transition_status,
 )
+from agentflow.registry import ActionErrorCategory, ActionFailure
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = "70b823ceda15"
+REVISION = "d9156bc2a041"
 
 
-def run_migration(database_url: str):
+def run_migration(database_url: str, revision: str = "head"):
     env = {**os.environ, "DATABASE_URL": database_url}
     return subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "upgrade", revision],
         cwd=ROOT,
         env=env,
         text=True,
@@ -57,6 +59,12 @@ def test_fresh_database_migration_is_repeatable_and_revisioned(tmp_path):
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert "workflow_version_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(workflow_runs)")
+        }
+        assert "error_category" in {
+            row[1] for row in connection.execute("PRAGMA table_info(workflow_runs)")
+        }
+        assert "error_category" in {
+            row[1] for row in connection.execute("PRAGMA table_info(step_runs)")
         }
 
 
@@ -180,6 +188,57 @@ def test_phase1_migration_preserves_workflows_runs_and_steps(tmp_path):
             (22, "upper", 1, "succeeded", '{"value":"KEPT"}'),
             (23, "interrupted", 0, "failed", None),
         ]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_phase2_database_upgrade_preserves_execution_and_adds_nullable_categories(tmp_path):
+    database = tmp_path / "phase2.db"
+    url = sqlite_url(database)
+    run_migration(url, "70b823ceda15")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO workflows(id,name,description,created_at,updated_at) "
+            "VALUES (1,'Existing',NULL,'2025-01-01','2025-01-01')"
+        )
+        connection.execute(
+            "INSERT INTO workflow_versions(id,workflow_id,version_number,definition,created_at) "
+            "VALUES (1,1,1,?, '2025-01-01')",
+            (
+                json.dumps(
+                    {
+                        "version": 1,
+                        "name": "Existing",
+                        "steps": [
+                            {"id": "one", "action": "set_value", "inputs": {"value": "kept"}}
+                        ],
+                    }
+                ),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO workflow_runs(id,workflow_id,workflow_version_id,status,input,output,"
+            "created_at,started_at,finished_at,error) "
+            "VALUES (4,1,1,'failed',NULL,NULL,'2025-01-02','2025-01-02','2025-01-03',"
+            "'legacy failure')"
+        )
+        connection.execute(
+            "INSERT INTO step_runs(id,run_id,step_id,step_order,action,status,inputs,output,error,"
+            "started_at,finished_at) VALUES (9,4,'one',0,'uppercase','failed','{}',NULL,"
+            "'legacy step failure','2025-01-02','2025-01-03')"
+        )
+
+    run_migration(url)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT id,workflow_id,workflow_version_id,status,error,error_category "
+            "FROM workflow_runs"
+        ).fetchall() == [(4, 1, 1, "failed", "legacy failure", None)]
+        assert connection.execute(
+            "SELECT id,run_id,step_id,step_order,status,error,error_category FROM step_runs"
+        ).fetchall() == [(9, 4, "one", 0, "failed", "legacy step failure", None)]
+        assert (
+            connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == REVISION
+        )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -308,3 +367,55 @@ def test_state_transition_contract_and_atomic_failed_commit(session):
     event.remove(session, "before_commit", fail_commit)
     session.rollback()
     assert session.scalar(select(WorkflowRun)) is None
+
+
+def test_classified_action_failure_is_persisted_on_run_and_step(session, monkeypatch):
+    workflow, version = make_workflow(session)
+
+    def fail_action(*_args, **_kwargs):
+        raise ActionFailure(
+            ActionErrorCategory.EXECUTION_FAILED,
+            "Action execution failed.",
+        )
+
+    monkeypatch.setattr("agentflow.execution.run_action", fail_action)
+    run = execute_workflow(session, workflow, version)
+    assert run.status == RunStatus.FAILED
+    assert run.error_category == "execution_failed"
+    assert len(run.steps) == 1
+    assert run.steps[0].error_category == "execution_failed"
+    assert "Action execution failed" in run.error
+
+
+def test_error_category_constraints_reject_unknown_values(session):
+    workflow, version = make_workflow(session)
+    run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_version_id=version.id,
+        status=RunStatus.FAILED,
+        error_category="not_a_category",
+    )
+    session.add(run)
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+    run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_version_id=version.id,
+        status=RunStatus.FAILED,
+    )
+    session.add(run)
+    session.flush()
+    session.add(
+        StepRun(
+            run_id=run.id,
+            step_id="one",
+            step_order=0,
+            action="set_value",
+            status="failed",
+            inputs={},
+            error_category="not_a_category",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()

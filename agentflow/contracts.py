@@ -35,6 +35,7 @@ class StepRunResponse(BaseModel):
     inputs: dict[str, Any]
     output: dict[str, Any] | None
     error: str | None
+    error_category: str | None
     started_at: datetime | None
     finished_at: datetime | None
 
@@ -48,7 +49,16 @@ class RunResponse(BaseModel):
     input: dict[str, Any] | None
     output: dict[str, Any] | None
     error: str | None
+    error_category: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    summary: "RunSummary"
     steps: list[StepRunResponse]
+
+
+class RunSummary(BaseModel):
+    total_steps: int
+    succeeded_steps: int
+    failed_steps: int
+    not_started_steps: int

@@ -1,28 +1,69 @@
-"""Allowlisted deterministic actions and their typed input contracts."""
+"""Allowlisted actions with explicit contracts and execution metadata."""
 
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 
-class StrictInput(BaseModel):
+class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-Scalar = Annotated[str, StringConstraints(max_length=10000)] | int | float | bool
+Scalar = Annotated[str, StringConstraints(max_length=10_000)] | int | float | bool
 
 
-class SetValueInput(StrictInput):
+class SetValueInput(StrictModel):
     value: Scalar
 
 
-class UppercaseInput(StrictInput):
-    value: str = Field(max_length=10000)
+class UppercaseInput(StrictModel):
+    value: str = Field(max_length=10_000)
 
 
-class AppendInput(StrictInput):
-    value: str = Field(max_length=10000)
-    suffix: str = Field(max_length=1000)
+class AppendInput(StrictModel):
+    value: str = Field(max_length=10_000)
+    suffix: str = Field(max_length=1_000)
+
+
+class ScalarOutput(StrictModel):
+    value: Scalar
+
+
+class TextOutput(StrictModel):
+    value: str = Field(max_length=11_000)
+
+
+class ActionErrorCategory(StrEnum):
+    UNKNOWN_ACTION = "unknown_action"
+    INVALID_INPUT = "invalid_input"
+    INVALID_OUTPUT = "invalid_output"
+    PERMISSION_DENIED = "permission_denied"
+    EXECUTION_FAILED = "execution_failed"
+
+
+class TimeoutPolicy(StrEnum):
+    """Phase 3 policy for bounded local actions; hard cancellation is Phase 4."""
+
+    BOUNDED_LOCAL = "bounded_local_no_wall_clock_timeout"
+
+
+class ActionFailure(ValueError):
+    def __init__(self, category: ActionErrorCategory, safe_message: str):
+        super().__init__(safe_message)
+        self.category = category
+        self.safe_message = safe_message
+
+
+@dataclass(frozen=True)
+class ActionSpec:
+    input_schema: type[BaseModel]
+    output_schema: type[BaseModel]
+    handler: Any
+    description: str
+    required_permissions: tuple[str, ...] = ()
+    timeout_policy: TimeoutPolicy = TimeoutPolicy.BOUNDED_LOCAL
 
 
 def set_value(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -37,24 +78,33 @@ def append_text(inputs: dict[str, Any]) -> dict[str, Any]:
     return {"value": inputs["value"] + inputs["suffix"]}
 
 
-ACTION_REGISTRY = {
-    "set_value": (SetValueInput, set_value, "Return a configured scalar value."),
-    "uppercase": (UppercaseInput, uppercase, "Convert text to uppercase."),
-    "append": (AppendInput, append_text, "Append a configured text suffix."),
+ACTION_REGISTRY: dict[str, ActionSpec] = {
+    "set_value": ActionSpec(
+        SetValueInput, ScalarOutput, set_value, "Return a configured scalar value."
+    ),
+    "uppercase": ActionSpec(UppercaseInput, TextOutput, uppercase, "Convert text to uppercase."),
+    "append": ActionSpec(AppendInput, TextOutput, append_text, "Append a configured text suffix."),
 }
 
 
+def action_spec(action: str) -> ActionSpec:
+    try:
+        return ACTION_REGISTRY[action]
+    except KeyError as exc:
+        raise ActionFailure(
+            ActionErrorCategory.UNKNOWN_ACTION, f"unknown action: {action}"
+        ) from exc
+
+
 def validate_step(step, prior_ids: set[str]) -> None:
-    if step.action not in ACTION_REGISTRY:
-        raise ValueError(f"unknown action: {step.action}")
-    schema, _, _ = ACTION_REGISTRY[step.action]
+    spec = action_spec(step.action)
     raw = dict(step.inputs)
     for key, value in raw.items():
         if isinstance(value, dict) and "$ref" in value:
             if value["$ref"] not in prior_ids:
                 raise ValueError("step reference must point to an earlier step")
-            raw[key] = _example_input(schema, key)
-    schema.model_validate(raw)
+            raw[key] = _example_input(spec.input_schema, key)
+    spec.input_schema.model_validate(raw)
 
 
 def _example_input(schema: type[BaseModel], key: str):
@@ -65,17 +115,51 @@ def _example_input(schema: type[BaseModel], key: str):
     return 1
 
 
-def run_action(action: str, inputs: dict[str, Any]) -> dict[str, Any]:
-    if action not in ACTION_REGISTRY:
-        raise ValueError(f"unknown action: {action}")
-    schema, handler, _ = ACTION_REGISTRY[action]
-    validated = schema.model_validate(inputs)
-    result = handler(validated.model_dump())
-    return result
+def run_action(
+    action: str,
+    inputs: dict[str, Any],
+    *,
+    permissions: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    spec = action_spec(action)
+    missing = set(spec.required_permissions) - permissions
+    if missing:
+        raise ActionFailure(
+            ActionErrorCategory.PERMISSION_DENIED,
+            "Execution context does not grant the action's required permission.",
+        )
+    try:
+        validated_input = spec.input_schema.model_validate(inputs)
+    except ValidationError as exc:
+        raise ActionFailure(
+            ActionErrorCategory.INVALID_INPUT,
+            "Action inputs do not match the registered action schema.",
+        ) from exc
+    try:
+        result = spec.handler(validated_input.model_dump())
+    except Exception as exc:
+        raise ActionFailure(
+            ActionErrorCategory.EXECUTION_FAILED, "Action execution failed."
+        ) from exc
+    try:
+        validated_output = spec.output_schema.model_validate(result)
+    except ValidationError as exc:
+        raise ActionFailure(
+            ActionErrorCategory.INVALID_OUTPUT,
+            "Action output does not match the registered output schema.",
+        ) from exc
+    return validated_output.model_dump(mode="json")
 
 
-def action_catalog() -> list[dict[str, str]]:
+def action_catalog() -> list[dict[str, Any]]:
     return [
-        {"id": key, "description": description}
-        for key, (_, _, description) in ACTION_REGISTRY.items()
+        {
+            "id": key,
+            "description": spec.description,
+            "input_schema": spec.input_schema.model_json_schema(),
+            "output_schema": spec.output_schema.model_json_schema(),
+            "required_permissions": list(spec.required_permissions),
+            "timeout_policy": spec.timeout_policy.value,
+        }
+        for key, spec in ACTION_REGISTRY.items()
     ]

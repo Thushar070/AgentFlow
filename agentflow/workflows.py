@@ -1,10 +1,12 @@
 """Versioned workflow contract and definition validation."""
 
+import json
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 StepId = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,79}$")]
+MAX_DEFINITION_BYTES = 512 * 1024
 
 
 class StepDefinition(BaseModel):
@@ -36,6 +38,9 @@ class WorkflowDefinition(BaseModel):
                             "step references must point to an earlier step using only $ref"
                         )
             seen.add(step.id)
+        size = len(json.dumps(self.model_dump(mode="json"), separators=(",", ":")).encode("utf-8"))
+        if size > MAX_DEFINITION_BYTES:
+            raise ValueError(f"workflow definition exceeds {MAX_DEFINITION_BYTES} bytes")
         return self
 
 

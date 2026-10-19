@@ -2,7 +2,6 @@
 
 from datetime import UTC, datetime
 
-from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from agentflow.models import (
@@ -14,7 +13,7 @@ from agentflow.models import (
     WorkflowVersion,
     transition_status,
 )
-from agentflow.registry import run_action
+from agentflow.registry import ActionFailure, run_action
 from agentflow.workflows import validate_definition
 
 
@@ -64,15 +63,19 @@ def execute_workflow(session: Session, workflow: Workflow, version: WorkflowVers
                     record.status, StepStatus.SUCCEEDED, entity="step"
                 )
                 outputs[step.id] = record.output
-            except ValidationError:
+            except ActionFailure as exc:
                 record.status = transition_status(record.status, StepStatus.FAILED, entity="step")
-                record.error = "Action inputs do not match the registered action schema."
-                run.error = f"Step '{step.id}' failed: invalid action inputs."
+                record.error = exc.safe_message
+                record.error_category = exc.category.value
+                run.error = f"Step '{step.id}' failed: {exc.safe_message}"
+                run.error_category = exc.category.value
                 failed = True
             except Exception:
                 record.status = transition_status(record.status, StepStatus.FAILED, entity="step")
                 record.error = "Action execution failed."
+                record.error_category = "execution_failed"
                 run.error = f"Step '{step.id}' failed during action execution."
+                run.error_category = "execution_failed"
                 failed = True
             record.finished_at = now()
             if failed:

@@ -126,6 +126,12 @@ class WorkflowRun(Base):
             name="fk_run_version_workflow",
         ),
         CheckConstraint("status IN ('running', 'succeeded', 'failed')", name="ck_run_status"),
+        CheckConstraint(
+            "error_category IS NULL OR error_category IN "
+            "('unknown_action', 'invalid_input', 'invalid_output', "
+            "'permission_denied', 'execution_failed')",
+            name="ck_run_error_category",
+        ),
         Index("ix_workflow_runs_workflow_status", "workflow_id", "status"),
     )
 
@@ -139,6 +145,7 @@ class WorkflowRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     error: Mapped[str | None] = mapped_column(Text)
+    error_category: Mapped[str | None] = mapped_column(String(40))
     workflow: Mapped[Workflow] = relationship(back_populates="runs", foreign_keys=[workflow_id])
     workflow_version: Mapped[WorkflowVersion] = relationship(
         back_populates="runs", foreign_keys=[workflow_version_id]
@@ -155,6 +162,12 @@ class StepRun(Base):
         UniqueConstraint("run_id", "step_order", name="uq_step_run_order"),
         CheckConstraint("step_order >= 0", name="ck_step_order_nonnegative"),
         CheckConstraint("status IN ('running', 'succeeded', 'failed')", name="ck_step_run_status"),
+        CheckConstraint(
+            "error_category IS NULL OR error_category IN "
+            "('unknown_action', 'invalid_input', 'invalid_output', "
+            "'permission_denied', 'execution_failed')",
+            name="ck_step_error_category",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -166,6 +179,7 @@ class StepRun(Base):
     inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
     output: Mapped[dict | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
+    error_category: Mapped[str | None] = mapped_column(String(40))
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     run: Mapped[WorkflowRun] = relationship(back_populates="steps")

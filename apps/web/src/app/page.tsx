@@ -35,13 +35,21 @@ type StepRun = {
   status: string;
   output?: Record<string, unknown> | null;
   error?: string | null;
+  error_category?: string | null;
 };
 type Run = {
   id: number;
   workflow_id: number;
   status: string;
   error?: string | null;
+  error_category?: string | null;
   started_at?: string | null;
+  summary: {
+    total_steps: number;
+    succeeded_steps: number;
+    failed_steps: number;
+    not_started_steps: number;
+  };
   steps: StepRun[];
 };
 
@@ -316,6 +324,12 @@ export default function Home() {
                       : "Just now"}
                   </span>
                 </div>
+                <p className="run-summary">
+                  {run.summary.succeeded_steps} succeeded ·{" "}
+                  {run.summary.failed_steps} failed ·{" "}
+                  {run.summary.not_started_steps} not started of{" "}
+                  {run.summary.total_steps} steps
+                </p>
                 {run.error && <p className="run-error">{run.error}</p>}
                 <div className="step-list">
                   {run.steps.map((step) => (
@@ -325,6 +339,9 @@ export default function Home() {
                       </span>
                       <span className="step-name">{step.id}</span>
                       <code>{step.action}</code>
+                      {step.error_category && (
+                        <code>{step.error_category}</code>
+                      )}
                       <span className="step-output">
                         {step.error ??
                           (step.output
