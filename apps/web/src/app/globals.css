@@ -977,6 +977,23 @@ summary:focus-visible {
 .run-detail {
   padding: 22px;
 }
+.workflow-output {
+  margin: 16px 0;
+  padding: 13px 15px;
+  border: 1px solid #dfe8e1;
+  border-radius: 10px;
+  background: #f8faf8;
+}
+.workflow-output summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.workflow-output pre {
+  overflow: auto;
+  max-height: 330px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .run-detail > .section-heading h2 {
   margin-top: 9px;
 }

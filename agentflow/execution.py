@@ -15,7 +15,7 @@ from agentflow.models import (
     WorkflowVersion,
     utcnow,
 )
-from agentflow.workflows import validate_definition
+from agentflow.workflows import validate_definition, validate_run_input
 
 
 def now() -> datetime:
@@ -28,13 +28,15 @@ def enqueue_workflow(
     version: WorkflowVersion,
     *,
     idempotency_key: str | None = None,
+    run_input: dict | None = None,
     created_by_id: int | None = None,
     correlation_id: str = "system",
 ) -> WorkflowRun:
     """Persist a queued run and its unique queue row in one database commit."""
     if version.workflow_id != workflow.id:
         raise ValueError("Workflow version does not belong to this workflow")
-    validate_definition(version.definition)
+    definition = validate_definition(version.definition)
+    validated_input = validate_run_input(definition, run_input)
     if idempotency_key:
         existing = session.scalar(
             select(WorkflowRun).where(
@@ -65,6 +67,7 @@ def enqueue_workflow(
         workflow_id=workflow.id,
         workflow_version_id=version.id,
         status=RunStatus.QUEUED,
+        input=validated_input,
         created_at=now(),
         idempotency_key=idempotency_key,
         created_by_id=created_by_id,

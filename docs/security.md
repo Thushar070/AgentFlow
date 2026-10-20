@@ -35,15 +35,23 @@ The requester cannot approve their own request. Admin role does not bypass a pen
 ### Approval policy
 
 - Approval is configured by action identifier in server configuration and is checked by the worker immediately before an attempt starts.
-- All current built-in actions are pure local transformations and require no approval by default. Deployments can designate an allowlisted action as approval-required; unknown action names fail startup/config validation.
+- Local transformations and `http_request` require no approval by default. `send_webhook` and `require_approval` always require an approval; deployments can designate additional registered actions. Unknown configured action names fail startup/config validation.
 - A persisted approval binds one run step, action, immutable workflow version, and canonical hash of resolved inputs. Stale or rejected decisions never authorize execution. Approval decisions and run resumption commit atomically; a conditional state transition prevents duplicate decisions/replays.
 
 ### Audit, redaction, limits, dependencies
 
 - Structured audit events are append-only through application APIs and recorded in the same transaction as relevant state changes. Database administrators can still edit/delete rows; no cryptographic immutability is claimed.
-- Redaction is recursive for common credential field names and known token patterns at API, audit, and diagnostic boundaries. Workflow inputs/outputs are execution data and must remain intact for deterministic downstream steps; therefore raw values can still exist in the database. Do not place credentials in workflow payloads. The application database and backups require OS-level protection.
+- Redaction is recursive for common credential field names and known token patterns at API, audit, diagnostic, and outbound response boundaries. Workflow inputs/outputs are execution data and must remain intact for deterministic downstream steps; therefore raw values can still exist in the database. Do not place credentials in workflow payloads. The application database and backups require OS-level protection.
 - Apply a bounded request-body limit, workflow/depth/string limits, run-creation quota, and bounded audit/approval pagination. Avoid a new queue, identity provider, or rate-limit service.
-- New runtime dependency: `argon2-cffi` for Argon2id password hashing. Session storage, approvals, audit, and limits use the existing SQLAlchemy database.
+- Runtime dependencies: `argon2-cffi` for Argon2id password hashing, plus `httpx`/`httpcore` for the bounded outbound HTTP client and validated-address transport. Session storage, approvals, audit, and limits use the existing SQLAlchemy database.
+
+### Registered actions and outbound requests
+
+- The backend action registry is authoritative and `GET /api/actions` requires authentication. Actions declare input/output schemas, category, permission metadata, timeout, attempt, replay, and approval policy. Inputs and outputs are validated at API/worker boundaries. Limits include bounded JSON depth and size, definition size, per-action strings/arrays, a 50-step flattened workflow limit, HTTP response size, and HTTP timeout.
+- `http_request` and `send_webhook` use an exact administrator-configured host and port allowlist. Wildcards are rejected. The client rejects URL userinfo, fragments, disallowed ports, non-HTTPS non-test requests, and DNS answers that are loopback, private, link-local, reserved, multicast, or otherwise non-global. It pins a validated DNS address for the connection to mitigate rebinding, disables environment proxies and redirects, and forwards no application cookies or authorization headers. Only selected response headers are returned. Text and JSON responses are size-bounded and redacted.
+- The only HTTP exception is `APP_ENV=test` with the exact loopback hostname and port explicitly allowlisted for a disposable local mock service. Do not use this mode or allowlist on a deployed service. Production should keep the default empty host list until a trusted integration is explicitly configured.
+- HTTP and webhook actions use one attempt and are marked non-replayable. Webhooks additionally require approval. A timeout after a receiver acted but before AgentFlow persisted the response is ambiguous; no exactly-once delivery or automatic reconciliation is claimed. Attempt state is persisted, but there is no external receiver's transaction/idempotency protocol.
+- Four authenticated workflow templates are available from `GET /api/examples`; the endpoint returns definitions only and creates no users, workflows, or runs. The API example succeeds only when its destination is on the server allowlist.
 
 ## Threat model and initial findings
 
@@ -55,6 +63,8 @@ The requester cannot approve their own request. Admin role does not bypass a pen
 | Unauthorized cancel/update/run/account changes | Server-side role and owner checks on each route. |
 | Secret leakage and log injection | Recursive API/audit redaction, safe generic client errors, structured metadata only, bounded inputs. |
 | Denial of service through payloads/repeated runs/history | Body and nesting caps, existing definition/action limits, per-user run quota, maximum query page sizes. |
+| Outbound SSRF through workflow URLs | Exact host and port allowlists, HTTPS outside test, DNS address checks and connection pinning, no redirects/proxies, bounded responses/timeouts; local HTTP is test-only. |
+| Duplicate/ambiguous external side effect | External actions have one attempt, are marked non-replayable, and webhook requires approval; receiver-side idempotency/reconciliation is not implemented. |
 | Database/audit tampering by an OS or DB administrator | Not prevented cryptographically. Restrict database and backup filesystem access; audit rows are not tamper-proof against an administrator. |
 
 ## Deployment limits
@@ -63,4 +73,4 @@ The requester cannot approve their own request. Admin role does not bypass a pen
 - Do not trust identity headers from arbitrary clients. This implementation uses local password authentication and does not trust a reverse proxy identity by default.
 - Session tokens are opaque and stored hashed, but users and operators with direct database access can alter application state. SQLite file access is a security boundary.
 - Execution payloads and results are persisted to support deterministic replay and history. Recursive redaction protects API/audit/log output but cannot safely remove arbitrary values from execution records without changing workflow semantics.
-- Built-in actions are pure local transforms. Future side-effect actions need their own authorization, idempotency, approval, and reconciliation design; the engine makes no exactly-once claim.
+- Outbound actions are restricted by configured host/port allowlists but their receiver-side idempotency and reconciliation are not implemented. A request timeout can leave the external outcome unknown; inspect the receiver before manually rerunning.

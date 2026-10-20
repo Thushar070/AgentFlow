@@ -12,11 +12,89 @@ def test_health_and_action_catalog(client):
         "set_value",
         "uppercase",
         "append",
+        "trim_text",
+        "replace_text",
+        "concatenate_text",
+        "parse_json",
+        "get_json_field",
+        "validate_email",
+        "validate_url",
+        "compare_values",
+        "filter_records",
+        "clean_records",
+        "calculate_total",
+        "http_request",
+        "send_webhook",
+        "require_approval",
+        "create_result",
     }
+    assert catalog["send_webhook"]["approval_required"] is True
+    assert catalog["http_request"]["idempotent_replay"] is False
     assert catalog["uppercase"]["output_schema"]["type"] == "object"
     assert catalog["uppercase"]["required_permissions"] == []
     assert catalog["uppercase"]["timeout_policy"] == "separate_process_hard_timeout"
     assert catalog["uppercase"]["max_attempts"] == 3
+
+
+def test_example_templates_are_valid_and_do_not_create_workflow_rows(client):
+    from agentflow.workflows import validate_definition
+
+    before = client.get("/api/workflows").json()
+    examples = client.get("/api/examples")
+    assert examples.status_code == 200
+    assert {item["id"] for item in examples.json()} == {
+        "customer_validation",
+        "api_data_processing",
+        "human_approval",
+        "data_cleaning",
+    }
+    for example in examples.json():
+        validate_definition({key: value for key, value in example.items() if key != "id"})
+    assert client.get("/api/workflows").json() == before
+
+
+def test_reference_paths_and_static_types_are_checked_before_queueing(client):
+    mismatch = {
+        "version": 1,
+        "name": "Invalid reference type",
+        "steps": [
+            {"id": "number", "action": "set_value", "inputs": {"value": 42}},
+            {"id": "upper", "action": "uppercase", "inputs": {"value": {"$ref": "number"}}},
+        ],
+    }
+    assert client.post("/api/workflows", json=mismatch).status_code == 422
+
+    missing = {
+        "version": 1,
+        "name": "Missing output field",
+        "steps": [
+            {
+                "id": "record",
+                "action": "set_value",
+                "inputs": {"value": {"email": "ada@example.test"}},
+            },
+            {
+                "id": "upper",
+                "action": "uppercase",
+                "inputs": {"value": {"$ref": {"step": "record", "path": "/value/phone"}}},
+            },
+        ],
+    }
+    assert client.post("/api/workflows", json=missing).status_code == 422
+
+    valid = {
+        **missing,
+        "name": "Valid nested reference",
+        "steps": [
+            missing["steps"][0],
+            {
+                "id": "upper",
+                "action": "uppercase",
+                "inputs": {"value": {"$ref": {"step": "record", "path": "/value/email"}}},
+            },
+        ],
+    }
+    assert client.post("/api/workflows", json=valid).status_code == 201
 
 
 def test_create_and_read_workflow(client, valid_definition):
@@ -129,8 +207,7 @@ def test_records_failed_step_and_stops_run(client, valid_definition):
     definition = {
         **valid_definition,
         "steps": [
-            {"id": "number", "action": "set_value", "inputs": {"value": 42}},
-            {"id": "needs_text", "action": "uppercase", "inputs": {"value": {"$ref": "number"}}},
+            {"id": "bad_json", "action": "parse_json", "inputs": {"value": "{bad"}},
             {"id": "never", "action": "set_value", "inputs": {"value": "not run"}},
         ],
     }
@@ -139,17 +216,16 @@ def test_records_failed_step_and_stops_run(client, valid_definition):
     run_worker_once(client)
     run = client.get(f"/api/runs/{queued['id']}").json()
     assert run["status"] == "failed"
-    assert run["error_category"] == "invalid_input"
+    assert run["error_category"] == "invalid_json"
     assert run["summary"] == {
-        "total_steps": 3,
-        "succeeded_steps": 1,
+        "total_steps": 2,
+        "succeeded_steps": 0,
         "failed_steps": 1,
         "not_started_steps": 1,
     }
-    assert [step["status"] for step in run["steps"]] == ["succeeded", "failed"]
-    assert run["steps"][1]["error_category"] == "invalid_input"
-    assert "registered action schema" in run["steps"][1]["error"]
-    assert "42" not in run["steps"][1]["error"]
+    assert [step["status"] for step in run["steps"]] == ["failed"]
+    assert run["steps"][0]["error_category"] == "invalid_json"
+    assert "bounded JSON" in run["steps"][0]["error"]
     assert run["output"] is None
     assert "42" not in run["error"]
 

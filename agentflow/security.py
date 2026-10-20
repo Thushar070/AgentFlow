@@ -15,11 +15,15 @@ TOKEN_VALUE = re.compile(
     r"gh[pousr]_[A-Za-z0-9_]{16,}|"
     r"AKIA[A-Z0-9]{16})"
 )
+ASSIGNMENT_SECRET = re.compile(
+    r"(?i)(\b(?:password|passwd|secret|token|authorization|api[_-]?key|credential)\s*[:=]\s*)"
+    r"([^\s,;&]+)"
+)
 REDACTED = "[REDACTED]"
 
 
 def redact_text(value: str) -> str:
-    return TOKEN_VALUE.sub(REDACTED, value)
+    return ASSIGNMENT_SECRET.sub(r"\1" + REDACTED, TOKEN_VALUE.sub(REDACTED, value))
 
 
 def redact(value: Any, *, key: str | None = None) -> Any:

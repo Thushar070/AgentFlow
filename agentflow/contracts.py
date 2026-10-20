@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WorkflowResponse(BaseModel):
@@ -26,6 +26,11 @@ class WorkflowVersionResponse(BaseModel):
     version_number: int
     definition: dict[str, Any]
     created_at: datetime
+
+
+class RunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    input: dict[str, Any] = Field(default_factory=dict)
 
 
 class StepAttemptResponse(BaseModel):

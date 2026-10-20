@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from agentflow.execution import enqueue_workflow
 from agentflow.models import (
+    ApprovalRequest,
     Base,
     RunStatus,
     StepAttempt,
@@ -79,6 +80,76 @@ def test_durable_job_is_claimed_once_and_success_is_persisted(database):
         assert run.output == {"value": "ok"}
         assert job.status == "succeeded"
         assert session.scalar(select(StepAttempt)).status == "succeeded"
+
+
+@pytest.mark.parametrize(("left", "expected", "selected"), [(2, "yes", "then"), (0, "no", "else")])
+def test_conditional_executes_only_selected_branch_and_persists_skips(
+    database, left, expected, selected
+):
+    definition = {
+        "version": 1,
+        "name": "Branch flow",
+        "steps": [
+            {
+                "id": "choice",
+                "type": "conditional",
+                "condition": {"left": left, "operator": "gt", "right": 1},
+                "then_steps": [{"id": "yes", "action": "set_value", "inputs": {"value": "yes"}}],
+                "else_steps": [{"id": "no", "action": "set_value", "inputs": {"value": "no"}}],
+            }
+        ],
+    }
+    run_id, _ = queued_run(database, definition)
+    assert process_one_job(session_factory=database, worker_id="branch-worker")
+    with database() as session:
+        run = session.get(WorkflowRun, run_id)
+        assert run.status == RunStatus.SUCCEEDED
+        assert run.output["value"] == expected
+        steps = {step.step_id: step for step in run.steps}
+        assert steps[f"choice__{selected}__{expected}"].status == "succeeded"
+        skipped_name = "no" if selected == "then" else "yes"
+        assert (
+            steps[f"choice__{'else' if selected == 'then' else 'then'}__{skipped_name}"].status
+            == "skipped"
+        )
+        assert steps["choice"].output["decision"] is (selected == "then")
+
+
+def test_approval_gate_inside_selected_branch_pauses_before_attempt(database):
+    definition = {
+        "version": 1,
+        "name": "Branch approval flow",
+        "steps": [
+            {
+                "id": "choice",
+                "type": "conditional",
+                "condition": {"left": True, "operator": "eq", "right": True},
+                "then_steps": [
+                    {
+                        "id": "sensitive",
+                        "action": "require_approval",
+                        "inputs": {"value": {"request": "delete"}},
+                    }
+                ],
+                "else_steps": [
+                    {"id": "not_selected", "action": "set_value", "inputs": {"value": "no"}}
+                ],
+            }
+        ],
+    }
+    run_id, _ = queued_run(database, definition)
+    assert process_one_job(session_factory=database, worker_id="approval-branch-worker")
+    with database() as session:
+        run = session.get(WorkflowRun, run_id)
+        assert run.status == RunStatus.AWAITING_APPROVAL
+        steps = {step.step_id: step for step in run.steps}
+        gate = steps["choice__then__sensitive"]
+        assert gate.status == "queued"
+        assert gate.attempts == []
+        assert steps["choice__else__not_selected"].status == "skipped"
+        request = session.scalar(select(ApprovalRequest).where(ApprovalRequest.run_id == run_id))
+        assert request.status == "pending"
+        assert request.workflow_version_id == run.workflow_version_id
 
 
 def test_transient_failure_retries_with_persisted_attempt_history(database, monkeypatch):

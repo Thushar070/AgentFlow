@@ -20,9 +20,19 @@ type FieldSchema = {
   description?: string;
   anyOf?: FieldSchema[];
   enum?: unknown[];
+  items?: FieldSchema;
+  additionalProperties?: FieldSchema | boolean;
+  default?: unknown;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
 };
 type Action = {
   id: string;
+  name: string;
+  category: string;
+  version: string;
   description: string;
   input_schema: {
     properties?: Record<string, FieldSchema>;
@@ -35,6 +45,7 @@ type Action = {
 };
 type DefinitionStep = {
   id: string;
+  type?: string;
   action: string;
   inputs: Record<string, unknown>;
 };
@@ -46,11 +57,20 @@ type Workflow = {
     version: number;
     name: string;
     description?: string;
+    input_schema?: Record<string, WorkflowInputField>;
     steps: DefinitionStep[];
   };
   current_version_number: number;
   created_at?: string;
   updated_at?: string;
+};
+type ExampleTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  version: number;
+  input_schema?: Record<string, WorkflowInputField>;
+  steps: Record<string, unknown>[];
 };
 type Attempt = {
   attempt_number: number;
@@ -87,6 +107,8 @@ type Run = {
     not_started_steps: number;
   };
   steps: StepRun[];
+  input?: Record<string, unknown> | null;
+  output?: Record<string, unknown> | null;
 };
 type Approval = {
   id: number;
@@ -175,15 +197,9 @@ function readableAction(action: Action | undefined, id: string) {
     ? action.description.replace(/[.]+$/, "")
     : id.replaceAll("_", " ");
 }
-function displayAction(id: string) {
+function displayAction(id: string, catalog: Action[]) {
   return (
-    (
-      {
-        set_value: "Set a value",
-        uppercase: "Convert to uppercase",
-        append: "Append text",
-      } as Record<string, string>
-    )[id] ?? id.replaceAll("_", " ")
+    catalog.find((item) => item.id === id)?.name ?? id.replaceAll("_", " ")
   );
 }
 function formatDate(value?: string | null) {
@@ -201,41 +217,134 @@ function pretty(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
+type WorkflowInputField = {
+  type: string;
+  required: boolean;
+  description?: string;
+  default?: unknown;
+};
 type BuilderStep = {
   key: string;
   action: string;
   inputs: Record<string, string>;
   refs: Record<string, string>;
+  paths: Record<string, string>;
+  conditional?: {
+    operator: string;
+    left: string;
+    right: string;
+    thenValue: string;
+    elseValue: string;
+  };
 };
 function fromDefinition(definition?: Workflow["definition"]): {
   name: string;
   description: string;
   steps: BuilderStep[];
+  inputSchema: Record<string, WorkflowInputField>;
 } {
   return {
     name: definition?.name ?? "",
     description: definition?.description ?? "",
+    inputSchema: definition?.input_schema ?? {},
     steps: (definition?.steps ?? []).map((step) => {
+      if (step.type === "conditional") {
+        const conditional = step as unknown as {
+          id: string;
+          condition: { left: unknown; operator: string; right: unknown };
+          then_steps: { inputs: { value?: unknown } }[];
+          else_steps: { inputs: { value?: unknown } }[];
+        };
+        return {
+          key: conditional.id,
+          action: "",
+          inputs: {},
+          refs: {},
+          paths: {},
+          conditional: {
+            operator: conditional.condition.operator,
+            left: JSON.stringify(conditional.condition.left),
+            right: JSON.stringify(conditional.condition.right),
+            thenValue: JSON.stringify(conditional.then_steps[0]?.inputs.value),
+            elseValue: JSON.stringify(conditional.else_steps[0]?.inputs.value),
+          },
+        };
+      }
       const inputs: Record<string, string> = {};
       const refs: Record<string, string> = {};
+      const paths: Record<string, string> = {};
       for (const [key, value] of Object.entries(step.inputs ?? {})) {
-        if (value && typeof value === "object" && "$ref" in value)
-          refs[key] = String((value as { $ref: unknown }).$ref);
-        else inputs[key] = value == null ? "" : String(value);
+        if (value && typeof value === "object" && "$ref" in value) {
+          const reference = (value as { $ref: unknown }).$ref;
+          if (typeof reference === "string") {
+            refs[key] = `step:${reference}`;
+            paths[key] = "/value";
+          } else if (reference && typeof reference === "object") {
+            const ref = reference as { step?: string; path?: string };
+            refs[key] = `step:${ref.step ?? ""}`;
+            paths[key] = ref.path ?? "/value";
+          }
+        } else if (value && typeof value === "object" && "$input" in value) {
+          const reference = (value as { $input: unknown }).$input;
+          if (typeof reference === "string") refs[key] = `input:${reference}`;
+          else if (reference && typeof reference === "object") {
+            const ref = reference as { name?: string; path?: string };
+            refs[key] = `input:${ref.name ?? ""}`;
+            paths[key] = ref.path ?? "";
+          }
+        } else {
+          inputs[key] =
+            typeof value === "string" ? value : JSON.stringify(value ?? "");
+        }
       }
-      return { key: step.id, action: step.action, inputs, refs };
+      return { key: step.id, action: step.action, inputs, refs, paths };
     }),
   };
 }
-function buildInputs(step: BuilderStep): Record<string, unknown> {
+function buildInputs(
+  step: BuilderStep,
+  action?: Action,
+): Record<string, unknown> {
   const inputs: Record<string, unknown> = {};
   for (const key of new Set([
     ...Object.keys(step.inputs),
     ...Object.keys(step.refs),
   ])) {
-    inputs[key] = step.refs[key] ? { $ref: step.refs[key] } : step.inputs[key];
+    const source = step.refs[key];
+    if (source?.startsWith("step:")) {
+      inputs[key] = {
+        $ref: { step: source.slice(5), path: step.paths[key] || "/value" },
+      };
+    } else if (source?.startsWith("input:")) {
+      const name = source.slice(6);
+      inputs[key] = step.paths[key]
+        ? { $input: { name, path: step.paths[key] } }
+        : { $input: name };
+    } else {
+      const raw = step.inputs[key] ?? "";
+      const schema = action?.input_schema.properties?.[key];
+      if (!raw.trim() && schema?.default === undefined) continue;
+      try {
+        inputs[key] = parseBuilderValue(raw, schema);
+      } catch {
+        inputs[key] = raw;
+      }
+    }
   }
   return inputs;
+}
+function parseBuilderValue(raw: string, schema?: FieldSchema): unknown {
+  if (schema?.type === "string") return raw;
+  if (schema?.type === "boolean") return raw === "true";
+  if (schema?.type === "number" || schema?.type === "integer") {
+    return raw.trim() === "" ? undefined : Number(raw);
+  }
+  if (raw.trim() === "") return schema?.default;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 export default function Home() {
@@ -250,6 +359,7 @@ export default function Home() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [actions, setActions] = useState<Action[]>([]);
+  const [examples, setExamples] = useState<ExampleTemplate[]>([]);
   const [apiReady, setApiReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -264,7 +374,19 @@ export default function Home() {
   const [canLoadMoreAudit, setCanLoadMoreAudit] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [workflowDescription, setWorkflowDescription] = useState("");
+  const [workflowInputSchema, setWorkflowInputSchema] = useState<
+    Record<string, WorkflowInputField>
+  >({});
+  const [workflowInputNameDrafts, setWorkflowInputNameDrafts] = useState<
+    Record<string, string>
+  >({});
   const [builderSteps, setBuilderSteps] = useState<BuilderStep[]>([]);
+  const [runInputWorkflow, setRunInputWorkflow] = useState<Workflow | null>(
+    null,
+  );
+  const [runInputValues, setRunInputValues] = useState<Record<string, string>>(
+    {},
+  );
   const [editingId, setEditingId] = useState<number | null>(null);
   const [loadingEdit, setLoadingEdit] = useState(false);
   const [validation, setValidation] = useState("");
@@ -295,20 +417,23 @@ export default function Home() {
       );
       csrfToken = auth.csrf_token;
       setUser(auth.user);
-      const [wf, recent, approvalsList, audit, catalog] = await Promise.all([
-        api<Workflow[]>("/api/workflows"),
-        api<Run[]>("/api/runs?limit=50"),
-        api<Approval[]>("/api/approvals?limit=100"),
-        auth.user.role === "admin"
-          ? api<AuditEvent[]>("/api/audit?limit=50&offset=0")
-          : Promise.resolve([] as AuditEvent[]),
-        api<Action[]>("/api/actions"),
-      ]);
+      const [wf, recent, approvalsList, audit, catalog, templates] =
+        await Promise.all([
+          api<Workflow[]>("/api/workflows"),
+          api<Run[]>("/api/runs?limit=50"),
+          api<Approval[]>("/api/approvals?limit=100"),
+          auth.user.role === "admin"
+            ? api<AuditEvent[]>("/api/audit?limit=50&offset=0")
+            : Promise.resolve([] as AuditEvent[]),
+          api<Action[]>("/api/actions"),
+          api<ExampleTemplate[]>("/api/examples"),
+        ]);
       setWorkflows(wf);
       setRuns(recent);
       setApprovals(approvalsList);
       setEvents(audit);
       setActions(catalog);
+      setExamples(templates);
       setAuditOffset(0);
       setCanLoadMoreAudit(auth.user.role === "admin" && audit.length === 50);
       setApiReady(true);
@@ -322,6 +447,7 @@ export default function Home() {
       setApprovals([]);
       setEvents([]);
       setActions([]);
+      setExamples([]);
       if (!unauth) report(cause, "Could not reach the AgentFlow API.");
       else setError("");
     } finally {
@@ -418,10 +544,31 @@ export default function Home() {
     setEditingId(null);
     setWorkflowName("");
     setWorkflowDescription("");
+    setWorkflowInputSchema({});
+    setWorkflowInputNameDrafts({});
     setBuilderSteps([]);
     setValidation("");
   }
   function startEdit(workflow: Workflow) {
+    const unsupportedBranch = workflow.definition.steps.some((step) => {
+      if (step.type !== "conditional") return false;
+      const conditional = step as unknown as {
+        then_steps: { action: string }[];
+        else_steps: { action: string }[];
+      };
+      return (
+        conditional.then_steps.length !== 1 ||
+        conditional.else_steps.length !== 1 ||
+        conditional.then_steps[0]?.action !== "set_value" ||
+        conditional.else_steps[0]?.action !== "set_value"
+      );
+    });
+    if (unsupportedBranch) {
+      setValidation(
+        "The visual editor can edit conditions with one Set a value result on each branch. This workflow has a richer branch; its saved definition remains available in Advanced view.",
+      );
+      return;
+    }
     setValidation("");
     router.push(`/workflows/${workflow.id}/edit`);
   }
@@ -430,28 +577,62 @@ export default function Home() {
     if (!action) return;
     const actionMeta = actions.find((item) => item.id === action);
     const inputs = Object.fromEntries(
-      Object.keys(actionMeta?.input_schema.properties ?? {}).map((key) => [
-        key,
-        "",
-      ]),
+      Object.entries(actionMeta?.input_schema.properties ?? {}).map(
+        ([key, schema]) => [
+          key,
+          schema.default === undefined ? "" : JSON.stringify(schema.default),
+        ],
+      ),
     );
     setBuilderSteps((steps) => [
       ...steps,
-      { key: `step_${steps.length + 1}`, action, inputs, refs: {} },
+      { key: `step_${steps.length + 1}`, action, inputs, refs: {}, paths: {} },
     ]);
     setValidation("");
+  }
+  function addConditional() {
+    setBuilderSteps((steps) => [
+      ...steps,
+      {
+        key: `condition_${steps.length + 1}`,
+        action: "",
+        inputs: {},
+        refs: {},
+        paths: {},
+        conditional: {
+          operator: "eq",
+          left: "",
+          right: "",
+          thenValue: "Condition was true",
+          elseValue: "Condition was false",
+        },
+      },
+    ]);
+  }
+  function changeCondition(index: number, key: string, value: string) {
+    setBuilderSteps((steps) =>
+      steps.map((step, i) =>
+        i === index && step.conditional
+          ? { ...step, conditional: { ...step.conditional, [key]: value } }
+          : step,
+      ),
+    );
   }
   function changeAction(index: number, actionId: string) {
     const actionMeta = actions.find((item) => item.id === actionId);
     const inputs = Object.fromEntries(
-      Object.keys(actionMeta?.input_schema.properties ?? {}).map((key) => [
-        key,
-        "",
-      ]),
+      Object.entries(actionMeta?.input_schema.properties ?? {}).map(
+        ([key, schema]) => [
+          key,
+          schema.default === undefined ? "" : JSON.stringify(schema.default),
+        ],
+      ),
     );
     setBuilderSteps((steps) =>
       steps.map((step, i) =>
-        i === index ? { ...step, action: actionId, inputs, refs: {} } : step,
+        i === index
+          ? { ...step, action: actionId, inputs, refs: {}, paths: {} }
+          : step,
       ),
     );
   }
@@ -475,6 +656,66 @@ export default function Home() {
       ),
     );
   }
+  function changeRefPath(index: number, key: string, value: string) {
+    setBuilderSteps((steps) =>
+      steps.map((step, i) =>
+        i === index
+          ? { ...step, paths: { ...step.paths, [key]: value } }
+          : step,
+      ),
+    );
+  }
+  function updateWorkflowInput(
+    oldName: string,
+    name: string,
+    field: WorkflowInputField,
+  ) {
+    setWorkflowInputSchema((current) => {
+      const updated = { ...current };
+      if (oldName !== name) delete updated[oldName];
+      if (name) updated[name] = field;
+      return updated;
+    });
+    if (oldName !== name) {
+      setBuilderSteps((steps) =>
+        steps.map((step) => ({
+          ...step,
+          refs: Object.fromEntries(
+            Object.entries(step.refs).map(([key, source]) => [
+              key,
+              source === `input:${oldName}` ? `input:${name}` : source,
+            ]),
+          ),
+        })),
+      );
+      setWorkflowInputNameDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[oldName];
+        return next;
+      });
+    }
+  }
+  function commitWorkflowInputName(name: string) {
+    const draft = workflowInputNameDrafts[name];
+    if (draft === undefined) return;
+    const nextName = draft.replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!nextName || (nextName !== name && workflowInputSchema[nextName])) {
+      setValidation(
+        "Input names must be unique and contain only letters, numbers, underscores, or hyphens.",
+      );
+      setWorkflowInputNameDrafts((current) => ({ ...current, [name]: name }));
+      return;
+    }
+    updateWorkflowInput(name, nextName, workflowInputSchema[name]);
+  }
+  function addWorkflowInput() {
+    let name = `input_${Object.keys(workflowInputSchema).length + 1}`;
+    while (workflowInputSchema[name]) name += "_";
+    setWorkflowInputSchema((current) => ({
+      ...current,
+      [name]: { type: "string", required: true },
+    }));
+  }
   function moveStep(index: number, delta: number) {
     const dest = index + delta;
     if (dest < 0 || dest >= builderSteps.length) return;
@@ -489,13 +730,55 @@ export default function Home() {
       ...(workflowDescription.trim()
         ? { description: workflowDescription.trim() }
         : {}),
-      steps: builderSteps.map((step) => ({
-        id: step.key,
-        action: step.action,
-        inputs: buildInputs(step),
-      })),
+      ...(Object.keys(workflowInputSchema).length
+        ? { input_schema: workflowInputSchema }
+        : {}),
+      steps: builderSteps.map((step) =>
+        step.conditional
+          ? {
+              id: step.key,
+              type: "conditional",
+              condition: {
+                left: parseBuilderValue(step.conditional.left),
+                operator: step.conditional.operator,
+                right: parseBuilderValue(step.conditional.right),
+              },
+              then_steps: [
+                {
+                  id: `${step.key}_then`,
+                  action: "set_value",
+                  inputs: {
+                    value: parseBuilderValue(step.conditional.thenValue),
+                  },
+                },
+              ],
+              else_steps: [
+                {
+                  id: `${step.key}_else`,
+                  action: "set_value",
+                  inputs: {
+                    value: parseBuilderValue(step.conditional.elseValue),
+                  },
+                },
+              ],
+            }
+          : {
+              id: step.key,
+              action: step.action,
+              inputs: buildInputs(
+                step,
+                actions.find((item) => item.id === step.action),
+              ),
+            },
+      ),
     }),
-    [workflowName, workflowDescription, builderSteps],
+    [
+      workflowName,
+      workflowDescription,
+      workflowInputSchema,
+      builderSteps,
+      actions,
+    ],
   );
   function checkBuilder() {
     if (!workflowName.trim()) return "Enter a workflow name.";
@@ -503,18 +786,54 @@ export default function Home() {
       return "Workflow names must be 200 characters or fewer.";
     if (!builderSteps.length) return "Add at least one action step.";
     for (const [index, step] of builderSteps.entries()) {
+      if (step.conditional) {
+        if (!step.conditional.left.trim() || !step.conditional.right.trim())
+          return `Condition ${index + 1}: enter both comparison values.`;
+        try {
+          parseBuilderValue(step.conditional.left);
+          parseBuilderValue(step.conditional.right);
+        } catch {
+          return `Condition ${index + 1}: enter valid comparison values.`;
+        }
+        continue;
+      }
       const spec = actions.find((item) => item.id === step.action);
       if (!spec) return `Step ${index + 1}: choose an available action.`;
+      const fields = spec.input_schema.properties ?? {};
       for (const field of spec.input_schema.required ?? []) {
-        if (!step.refs[field] && !step.inputs[field]?.trim())
-          return `Step ${index + 1}: enter ${field.replaceAll("_", " ")}.`;
+        const schema = fields[field];
+        const text = step.inputs[field] ?? "";
         if (
-          step.refs[field] &&
-          !builderSteps
-            .slice(0, index)
-            .some((prior) => prior.key === step.refs[field])
+          !step.refs[field] &&
+          !text.trim() &&
+          (schema?.type !== "string" || (schema.minLength ?? 0) > 0)
         )
-          return `Step ${index + 1}: choose an earlier step output.`;
+          return `Step ${index + 1}: enter ${field.replaceAll("_", " ")}.`;
+        if (step.refs[field]?.startsWith("step:")) {
+          const source = step.refs[field].slice(5);
+          if (
+            !builderSteps.slice(0, index).some((prior) => prior.key === source)
+          )
+            return `Step ${index + 1}: choose an earlier step output.`;
+        } else if (
+          step.refs[field]?.startsWith("input:") &&
+          !workflowInputSchema[step.refs[field].slice(6)]
+        ) {
+          return `Step ${index + 1}: choose a declared workflow input.`;
+        }
+        if (!step.refs[field] && text.trim()) {
+          try {
+            const parsed = parseBuilderValue(text, schema);
+            if (schema?.type === "number" && typeof parsed !== "number")
+              return `Step ${index + 1}: enter a number for ${field}.`;
+            if (schema?.type === "integer" && !Number.isInteger(parsed))
+              return `Step ${index + 1}: enter a whole number for ${field}.`;
+            if (schema?.enum && !schema.enum.includes(parsed))
+              return `Step ${index + 1}: choose a supported value for ${field}.`;
+          } catch {
+            return `Step ${index + 1}: enter valid structured data for ${field}.`;
+          }
+        }
       }
     }
     return "";
@@ -546,7 +865,28 @@ export default function Home() {
       setBusy(false);
     }
   }
-  async function runWorkflow(id: number) {
+  async function createFromExample(template: ExampleTemplate) {
+    setBusy(true);
+    try {
+      const definition = Object.fromEntries(
+        Object.entries(template).filter(([key]) => key !== "id"),
+      );
+      const saved = await api<Workflow>("/api/workflows", {
+        method: "POST",
+        body: JSON.stringify(definition),
+      });
+      setWorkflows((items) => [saved, ...items]);
+      router.push(`/workflows/${saved.id}`);
+    } catch (cause) {
+      report(cause, "Example workflow could not be created.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function submitWorkflowRun(
+    id: number,
+    input: Record<string, unknown> = {},
+  ) {
     setBusy(true);
     try {
       const key = runKeys.current.get(id) ?? crypto.randomUUID();
@@ -554,18 +894,59 @@ export default function Home() {
       const run = await api<Run>(`/api/workflows/${id}/runs`, {
         method: "POST",
         headers: { "Idempotency-Key": key },
+        body: Object.keys(input).length ? JSON.stringify({ input }) : undefined,
       });
       runKeys.current.delete(id);
       setRuns((current) => [
         run,
         ...current.filter((item) => item.id !== run.id),
       ]);
+      setRunInputWorkflow(null);
+      setRunInputValues({});
       router.push(`/runs/${run.id}`);
     } catch (cause) {
       report(cause, "Workflow could not be run.");
     } finally {
       setBusy(false);
     }
+  }
+  async function runWorkflow(id: number) {
+    const workflow = workflows.find((item) => item.id === id);
+    const schema = workflow?.definition.input_schema ?? {};
+    if (workflow && Object.keys(schema).length) {
+      setRunInputWorkflow(workflow);
+      setRunInputValues(
+        Object.fromEntries(
+          Object.entries(schema).map(([key, item]) => [
+            key,
+            item.default === undefined ? "" : JSON.stringify(item.default),
+          ]),
+        ),
+      );
+      return;
+    }
+    await submitWorkflowRun(id);
+  }
+  async function submitRunInput(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!runInputWorkflow) return;
+    const input: Record<string, unknown> = {};
+    try {
+      for (const [name, field] of Object.entries(
+        runInputWorkflow.definition.input_schema ?? {},
+      )) {
+        const raw = runInputValues[name] ?? "";
+        if (!raw.trim() && !field.required && field.default === undefined)
+          continue;
+        if (!raw.trim() && field.type !== "string")
+          throw new Error(`Enter ${name.replaceAll("_", " ")}.`);
+        input[name] = parseBuilderValue(raw, { type: field.type });
+      }
+    } catch (cause) {
+      report(cause, "Run input is invalid.");
+      return;
+    }
+    await submitWorkflowRun(runInputWorkflow.id, input);
   }
   async function cancelRun(id: number) {
     setBusy(true);
@@ -716,6 +1097,7 @@ export default function Home() {
         setEditingId(workflow.id);
         setWorkflowName(draft.name);
         setWorkflowDescription(draft.description);
+        setWorkflowInputSchema(draft.inputSchema);
         setBuilderSteps(draft.steps);
       })
       .catch((cause) => {
@@ -1053,6 +1435,37 @@ export default function Home() {
                   </Link>
                 )}
               </div>
+              {examples.length > 0 && (
+                <section className="panel">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">START WITH A TEMPLATE</p>
+                      <h2>Runnable examples</h2>
+                    </div>
+                    <span className="helper">
+                      Creates a workflow definition only; no sample runs or
+                      history are inserted.
+                    </span>
+                  </div>
+                  <div className="concept-grid">
+                    {examples.map((template) => (
+                      <article key={template.id}>
+                        <b>{template.name}</b>
+                        <p>{template.description}</p>
+                        {user.role !== "approver" && (
+                          <button
+                            className="button secondary"
+                            disabled={busy}
+                            onClick={() => void createFromExample(template)}
+                          >
+                            Add to my workflows
+                          </button>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
               {workflowDetail && (
                 <section className="panel">
                   <div className="section-heading">
@@ -1073,8 +1486,16 @@ export default function Home() {
                       <div key={step.id} className="preview-step">
                         <b>{index + 1}</b>
                         <span>
-                          <strong>{displayAction(step.action)}</strong>
-                          <small>{step.action}</small>
+                          <strong>
+                            {step.type === "conditional"
+                              ? "Conditional branch"
+                              : displayAction(step.action, actions)}
+                          </strong>
+                          <small>
+                            {step.type === "conditional"
+                              ? "Condition · THEN / ELSE"
+                              : step.action}
+                          </small>
                         </span>
                       </div>
                     ))}
@@ -1247,6 +1668,111 @@ export default function Home() {
                       placeholder="What should this workflow do?"
                     />
                   </section>
+                  <section className="panel">
+                    <div className="section-heading">
+                      <div>
+                        <p className="eyebrow">RUNTIME DATA</p>
+                        <h2>Workflow inputs</h2>
+                      </div>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        onClick={addWorkflowInput}
+                      >
+                        ＋ Add input
+                      </button>
+                    </div>
+                    {Object.entries(workflowInputSchema).length === 0 ? (
+                      <p className="helper">
+                        Inputs make a saved workflow reusable with different
+                        values each run.
+                      </p>
+                    ) : (
+                      Object.entries(workflowInputSchema).map(
+                        ([name, field]) => (
+                          <div className="input-field" key={name}>
+                            <div className="step-fields">
+                              <label>
+                                Input name
+                                <input
+                                  value={workflowInputNameDrafts[name] ?? name}
+                                  onChange={(event) =>
+                                    setWorkflowInputNameDrafts((drafts) => ({
+                                      ...drafts,
+                                      [name]: event.target.value,
+                                    }))
+                                  }
+                                  onBlur={() => commitWorkflowInputName(name)}
+                                />
+                              </label>
+                              <label>
+                                Type
+                                <select
+                                  value={field.type}
+                                  onChange={(event) =>
+                                    updateWorkflowInput(name, name, {
+                                      ...field,
+                                      type: event.target.value,
+                                    })
+                                  }
+                                >
+                                  {[
+                                    "string",
+                                    "number",
+                                    "integer",
+                                    "boolean",
+                                    "object",
+                                    "array",
+                                  ].map((type) => (
+                                    <option key={type}>{type}</option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="reference-choice">
+                                <input
+                                  type="checkbox"
+                                  checked={field.required}
+                                  onChange={(event) =>
+                                    updateWorkflowInput(name, name, {
+                                      ...field,
+                                      required: event.target.checked,
+                                    })
+                                  }
+                                />{" "}
+                                Required
+                              </label>
+                              <button
+                                type="button"
+                                className="button secondary small"
+                                onClick={() =>
+                                  setWorkflowInputSchema((current) =>
+                                    Object.fromEntries(
+                                      Object.entries(current).filter(
+                                        ([key]) => key !== name,
+                                      ),
+                                    ),
+                                  )
+                                }
+                              >
+                                Remove
+                              </button>
+                            </div>
+                            <input
+                              aria-label={`${name} description`}
+                              placeholder="Input description (optional)"
+                              value={field.description ?? ""}
+                              onChange={(event) =>
+                                updateWorkflowInput(name, name, {
+                                  ...field,
+                                  description: event.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                        ),
+                      )
+                    )}
+                  </section>
                   <section className="panel builder-steps">
                     <div className="section-heading">
                       <div>
@@ -1264,6 +1790,13 @@ export default function Home() {
                       >
                         ＋ Add step
                       </button>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={addConditional}
+                      >
+                        ＋ Add condition
+                      </button>
                     </div>
                     {!builderSteps.length ? (
                       <div className="empty builder-empty">
@@ -1280,7 +1813,7 @@ export default function Home() {
                               className="action-choice"
                               onClick={() => addStep(action.id)}
                             >
-                              <b>{displayAction(action.id)}</b>
+                              <b>{displayAction(action.id, actions)}</b>
                               <span>{readableAction(action, action.id)}</span>
                             </button>
                           ))}
@@ -1296,13 +1829,138 @@ export default function Home() {
                           const fields = Object.entries(
                             action?.input_schema.properties ?? {},
                           );
+                          if (step.conditional) {
+                            return (
+                              <article className="step-editor" key={step.key}>
+                                <div className="step-connector" />
+                                <div className="step-editor-head">
+                                  <span className="step-number">
+                                    {index + 1}
+                                  </span>
+                                  <div className="step-title">
+                                    <strong>Conditional branch</strong>
+                                    <small>
+                                      Only one path executes; the other is
+                                      persisted as skipped.
+                                    </small>
+                                  </div>
+                                  <button
+                                    className="icon-button danger"
+                                    aria-label={`Remove condition ${index + 1}`}
+                                    type="button"
+                                    onClick={() =>
+                                      setBuilderSteps((steps) =>
+                                        steps.filter((_, i) => i !== index),
+                                      )
+                                    }
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                                <div className="step-fields">
+                                  <label>
+                                    Left value
+                                    <input
+                                      value={step.conditional.left}
+                                      onChange={(event) =>
+                                        changeCondition(
+                                          index,
+                                          "left",
+                                          event.target.value,
+                                        )
+                                      }
+                                      placeholder='"approved" or 10'
+                                    />
+                                  </label>
+                                  <label>
+                                    Comparison
+                                    <select
+                                      value={step.conditional.operator}
+                                      onChange={(event) =>
+                                        changeCondition(
+                                          index,
+                                          "operator",
+                                          event.target.value,
+                                        )
+                                      }
+                                    >
+                                      {[
+                                        "eq",
+                                        "ne",
+                                        "gt",
+                                        "gte",
+                                        "lt",
+                                        "lte",
+                                        "is_empty",
+                                        "is_not_empty",
+                                      ].map((operator) => (
+                                        <option key={operator} value={operator}>
+                                          {operator.replaceAll("_", " ")}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <label>
+                                    Right value
+                                    <input
+                                      value={step.conditional.right}
+                                      onChange={(event) =>
+                                        changeCondition(
+                                          index,
+                                          "right",
+                                          event.target.value,
+                                        )
+                                      }
+                                      placeholder='"approved" or 10'
+                                    />
+                                  </label>
+                                </div>
+                                <div className="step-fields">
+                                  <label>
+                                    When true
+                                    <input
+                                      value={step.conditional.thenValue}
+                                      onChange={(event) =>
+                                        changeCondition(
+                                          index,
+                                          "thenValue",
+                                          event.target.value,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                  <label>
+                                    When false
+                                    <input
+                                      value={step.conditional.elseValue}
+                                      onChange={(event) =>
+                                        changeCondition(
+                                          index,
+                                          "elseValue",
+                                          event.target.value,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                </div>
+                                <div className="step-meta">
+                                  <span>
+                                    THEN and ELSE each return a configured
+                                    value.
+                                  </span>
+                                </div>
+                              </article>
+                            );
+                          }
                           return (
                             <article className="step-editor" key={step.key}>
                               <div className="step-connector" />
                               <div className="step-editor-head">
                                 <span className="step-number">{index + 1}</span>
                                 <div className="step-title">
-                                  <strong>{displayAction(step.action)}</strong>
+                                  <strong>
+                                    {displayAction(step.action, actions)}
+                                  </strong>
                                   <small>
                                     {readableAction(action, step.action)}
                                   </small>
@@ -1352,7 +2010,7 @@ export default function Home() {
                               >
                                 {actions.map((item) => (
                                   <option key={item.id} value={item.id}>
-                                    {displayAction(item.id)} —{" "}
+                                    {displayAction(item.id, actions)} —{" "}
                                     {item.description}
                                   </option>
                                 ))}
@@ -1364,11 +2022,8 @@ export default function Home() {
                                       field,
                                     );
                                   const canReference =
-                                    (schema.type === "string" ||
-                                      schema.anyOf?.some(
-                                        (item) => item.type === "string",
-                                      )) &&
-                                    index > 0;
+                                    index > 0 ||
+                                    Object.keys(workflowInputSchema).length > 0;
                                   return (
                                     <div key={field} className="input-field">
                                       <label htmlFor={`step-${index}-${field}`}>
@@ -1381,51 +2036,129 @@ export default function Home() {
                                         )}
                                       </label>
                                       {canReference && (
-                                        <label className="reference-choice">
-                                          <input
-                                            type="checkbox"
-                                            checked={Boolean(step.refs[field])}
-                                            onChange={(event) =>
-                                              changeRef(
-                                                index,
-                                                field,
-                                                event.target.checked
-                                                  ? (builderSteps[index - 1]
-                                                      ?.key ?? "")
-                                                  : "",
+                                        <select
+                                          aria-label={`Reference source for ${field}`}
+                                          value={step.refs[field] ?? ""}
+                                          onChange={(event) => {
+                                            changeRef(
+                                              index,
+                                              field,
+                                              event.target.value,
+                                            );
+                                            changeRefPath(
+                                              index,
+                                              field,
+                                              event.target.value.startsWith(
+                                                "step:",
                                               )
-                                            }
-                                          />{" "}
-                                          Use output from an earlier step
-                                        </label>
+                                                ? "/value"
+                                                : "",
+                                            );
+                                          }}
+                                        >
+                                          <option value="">
+                                            Use a literal value
+                                          </option>
+                                          {Object.keys(workflowInputSchema).map(
+                                            (name) => (
+                                              <option
+                                                key={`input:${name}`}
+                                                value={`input:${name}`}
+                                              >
+                                                Workflow input: {name}
+                                              </option>
+                                            ),
+                                          )}
+                                          {builderSteps
+                                            .slice(0, index)
+                                            .map((prior, priorIndex) => (
+                                              <option
+                                                key={`step:${prior.key}`}
+                                                value={`step:${prior.key}`}
+                                              >
+                                                Step {priorIndex + 1}:{" "}
+                                                {displayAction(
+                                                  prior.action,
+                                                  actions,
+                                                )}
+                                              </option>
+                                            ))}
+                                        </select>
                                       )}
                                       {step.refs[field] ? (
-                                        <select
-                                          aria-label={`Output source for ${field}`}
-                                          value={step.refs[field]}
+                                        <input
+                                          aria-label={`Output path for ${field}`}
+                                          value={step.paths[field] ?? ""}
                                           onChange={(event) =>
-                                            changeRef(
+                                            changeRefPath(
+                                              index,
+                                              field,
+                                              event.target.value,
+                                            )
+                                          }
+                                          placeholder="JSON Pointer path, e.g. /value/email"
+                                        />
+                                      ) : schema.enum ? (
+                                        <select
+                                          id={`step-${index}-${field}`}
+                                          value={step.inputs[field] ?? ""}
+                                          onChange={(event) =>
+                                            changeInput(
                                               index,
                                               field,
                                               event.target.value,
                                             )
                                           }
                                         >
-                                          <option value="">
-                                            Choose an earlier step
-                                          </option>
-                                          {builderSteps
-                                            .slice(0, index)
-                                            .map((prior, priorIndex) => (
-                                              <option
-                                                key={prior.key}
-                                                value={prior.key}
-                                              >
-                                                Step {priorIndex + 1}:{" "}
-                                                {displayAction(prior.action)}
-                                              </option>
-                                            ))}
+                                          <option value="">Choose…</option>
+                                          {schema.enum.map((item) => (
+                                            <option
+                                              key={String(item)}
+                                              value={String(item)}
+                                            >
+                                              {String(item)}
+                                            </option>
+                                          ))}
                                         </select>
+                                      ) : schema.type === "boolean" ? (
+                                        <select
+                                          id={`step-${index}-${field}`}
+                                          value={step.inputs[field] ?? ""}
+                                          onChange={(event) =>
+                                            changeInput(
+                                              index,
+                                              field,
+                                              event.target.value,
+                                            )
+                                          }
+                                        >
+                                          <option value="">Choose…</option>
+                                          <option value="true">Yes</option>
+                                          <option value="false">No</option>
+                                        </select>
+                                      ) : schema.type === "object" ||
+                                        schema.type === "array" ||
+                                        !schema.type ||
+                                        schema.anyOf ? (
+                                        <textarea
+                                          id={`step-${index}-${field}`}
+                                          rows={3}
+                                          value={step.inputs[field] ?? ""}
+                                          onChange={(event) =>
+                                            changeInput(
+                                              index,
+                                              field,
+                                              event.target.value,
+                                            )
+                                          }
+                                          placeholder={
+                                            schema.type === "array"
+                                              ? "Enter JSON array, e.g. []"
+                                              : schema.type === "object"
+                                                ? "Enter JSON object, e.g. {}"
+                                                : "Enter a JSON value"
+                                          }
+                                        />
                                       ) : (
                                         <input
                                           id={`step-${index}-${field}`}
@@ -1435,6 +2168,9 @@ export default function Home() {
                                               ? "number"
                                               : "text"
                                           }
+                                          min={schema.minimum}
+                                          max={schema.maximum}
+                                          maxLength={schema.maxLength}
                                           value={step.inputs[field] ?? ""}
                                           onChange={(event) =>
                                             changeInput(
@@ -1466,7 +2202,9 @@ export default function Home() {
                                   </span>
                                 ) : (
                                   <span>
-                                    Configured action · server validates inputs
+                                    {action?.category ?? "Configured action"} ·{" "}
+                                    {action?.timeout_seconds ?? "—"}s timeout ·{" "}
+                                    {action?.max_attempts ?? "—"} attempt(s)
                                   </span>
                                 )}
                               </div>
@@ -1533,17 +2271,33 @@ export default function Home() {
                           <div className="preview-node">
                             <b>{index + 1}</b>
                             <span>
-                              <strong>{displayAction(step.action)}</strong>
+                              <strong>
+                                {step.conditional
+                                  ? "Conditional branch"
+                                  : displayAction(step.action, actions)}
+                              </strong>
                               <small>
-                                {step.refs.value
-                                  ? `Uses output from step ${builderSteps.findIndex((item) => item.key === step.refs.value) + 1}`
-                                  : readableAction(
-                                      actions.find(
-                                        (item) => item.id === step.action,
-                                      ),
-                                      step.action,
-                                    )}
+                                {step.conditional
+                                  ? `${step.conditional.left || "left"} ${step.conditional.operator} ${step.conditional.right || "right"}`
+                                  : step.refs.value
+                                    ? step.refs.value.startsWith("step:")
+                                      ? `Uses output from step ${builderSteps.findIndex((item) => item.key === step.refs.value.slice(5)) + 1}`
+                                      : `Uses workflow input ${step.refs.value.slice(6)}`
+                                    : readableAction(
+                                        actions.find(
+                                          (item) => item.id === step.action,
+                                        ),
+                                        step.action,
+                                      )}
                               </small>
+                              {step.conditional && (
+                                <small>
+                                  THEN →{" "}
+                                  {step.conditional.thenValue || "result"} ·
+                                  ELSE →{" "}
+                                  {step.conditional.elseValue || "result"}
+                                </small>
+                              )}
                             </span>
                           </div>
                         </div>
@@ -1565,8 +2319,21 @@ export default function Home() {
                     <h2>Available actions</h2>
                     {actions.map((action) => (
                       <div key={action.id}>
-                        <b>{displayAction(action.id)}</b>
+                        <b>{displayAction(action.id, actions)}</b>
                         <p>{action.description}</p>
+                        <small className="field-help">
+                          {action.category} · {action.timeout_seconds}s timeout
+                          · {action.max_attempts} attempt(s)
+                          {action.approval_required
+                            ? " · approval required"
+                            : ""}
+                        </small>
+                        <small className="field-help">
+                          Output:{" "}
+                          {Object.keys(
+                            action.output_schema?.properties ?? {},
+                          ).join(", ") || "structured JSON value"}
+                        </small>
                       </div>
                     ))}
                   </section>
@@ -1648,7 +2415,7 @@ export default function Home() {
                             {item.status.replaceAll("_", " ")}
                           </span>
                           <h2>
-                            {displayAction(item.action)}{" "}
+                            {displayAction(item.action, actions)}{" "}
                             <small>in run #{item.run_id}</small>
                           </h2>
                         </div>
@@ -1898,6 +2665,95 @@ export default function Home() {
               </div>
             </>
           )}
+          {runInputWorkflow && (
+            <div className="modal-backdrop">
+              <section
+                className="panel run-input-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="run-input-title"
+              >
+                <p className="eyebrow">WORKFLOW INPUT</p>
+                <h2 id="run-input-title">Run {runInputWorkflow.name}</h2>
+                <p className="helper">
+                  Provide the values declared by this workflow before it starts.
+                </p>
+                <form onSubmit={submitRunInput}>
+                  {Object.entries(
+                    runInputWorkflow.definition.input_schema ?? {},
+                  ).map(([name, field]) => (
+                    <div className="input-field" key={name}>
+                      <label htmlFor={`run-input-${name}`}>
+                        {name.replaceAll("_", " ")}
+                        {field.required && <span className="required"> *</span>}
+                      </label>
+                      {field.type === "boolean" ? (
+                        <select
+                          id={`run-input-${name}`}
+                          value={runInputValues[name] ?? "false"}
+                          onChange={(event) =>
+                            setRunInputValues((values) => ({
+                              ...values,
+                              [name]: event.target.value,
+                            }))
+                          }
+                        >
+                          <option value="true">Yes</option>
+                          <option value="false">No</option>
+                        </select>
+                      ) : field.type === "object" || field.type === "array" ? (
+                        <textarea
+                          id={`run-input-${name}`}
+                          rows={4}
+                          value={runInputValues[name] ?? ""}
+                          onChange={(event) =>
+                            setRunInputValues((values) => ({
+                              ...values,
+                              [name]: event.target.value,
+                            }))
+                          }
+                          placeholder={field.type === "array" ? "[]" : "{}"}
+                        />
+                      ) : (
+                        <input
+                          id={`run-input-${name}`}
+                          type={
+                            field.type === "number" || field.type === "integer"
+                              ? "number"
+                              : "text"
+                          }
+                          value={runInputValues[name] ?? ""}
+                          onChange={(event) =>
+                            setRunInputValues((values) => ({
+                              ...values,
+                              [name]: event.target.value,
+                            }))
+                          }
+                        />
+                      )}
+                      {field.description && (
+                        <small className="field-help">
+                          {field.description}
+                        </small>
+                      )}
+                    </div>
+                  ))}
+                  <div className="button-row">
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={() => setRunInputWorkflow(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button className="button primary" disabled={busy}>
+                      Start workflow
+                    </button>
+                  </div>
+                </form>
+              </section>
+            </div>
+          )}
         </main>
       </div>
     </div>
@@ -2025,6 +2881,12 @@ function RunDetail({
           <p>{run.error}</p>
         </div>
       )}
+      {run.output && (
+        <details className="workflow-output" open>
+          <summary>Workflow output</summary>
+          <pre>{pretty(run.output)}</pre>
+        </details>
+      )}
       <div className="timeline">
         {run.steps.length ? (
           run.steps.map((step, index) => (
@@ -2035,12 +2897,19 @@ function RunDetail({
               <div className="timeline-content">
                 <div className="section-heading">
                   <div>
-                    <h3>{displayAction(step.action)}</h3>
+                    <h3>
+                      {step.action === "compare_values" &&
+                      typeof step.output?.decision === "boolean"
+                        ? "Conditional decision"
+                        : step.action.replaceAll("_", " ")}
+                    </h3>
                     <p>
                       Step {index + 1} · {step.id} ·{" "}
                       <span className={`run-state ${step.status}`}>
                         {step.status}
                       </span>
+                      {typeof step.output?.decision === "boolean" &&
+                        ` · ${step.output.decision ? "THEN branch" : "ELSE branch"}`}
                     </p>
                   </div>
                 </div>

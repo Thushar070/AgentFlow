@@ -62,6 +62,7 @@ class StepStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 class InvalidTransition(ValueError):
@@ -210,7 +211,9 @@ class WorkflowRun(Base):
             "('unknown_action', 'invalid_input', 'invalid_output', "
             "'permission_denied', 'execution_failed', 'action_timeout', "
             "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
-            "'approval_rejected')",
+            "'approval_rejected', 'field_not_found', 'invalid_json', 'destination_rejected', "
+            "'http_timeout', 'http_connection_error', 'http_status_error', 'size_limit', "
+            "'invalid_comparison')",
             name="ck_run_error_category",
         ),
         Index("ix_workflow_runs_workflow_status", "workflow_id", "status"),
@@ -247,7 +250,8 @@ class StepRun(Base):
         UniqueConstraint("run_id", "step_order", name="uq_step_run_order"),
         CheckConstraint("step_order >= 0", name="ck_step_order_nonnegative"),
         CheckConstraint(
-            "status IN ('queued', 'running', 'retrying', 'succeeded', 'failed', 'cancelled')",
+            "status IN ('queued', 'running', 'retrying', 'succeeded', 'failed', "
+            "'cancelled', 'skipped')",
             name="ck_step_run_status",
         ),
         CheckConstraint(
@@ -255,7 +259,9 @@ class StepRun(Base):
             "('unknown_action', 'invalid_input', 'invalid_output', "
             "'permission_denied', 'execution_failed', 'action_timeout', "
             "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
-            "'approval_rejected')",
+            "'approval_rejected', 'field_not_found', 'invalid_json', 'destination_rejected', "
+            "'http_timeout', 'http_connection_error', 'http_status_error', 'size_limit', "
+            "'invalid_comparison')",
             name="ck_step_error_category",
         ),
     )
@@ -326,7 +332,9 @@ class StepAttempt(Base):
             "error_category IS NULL OR error_category IN "
             "('unknown_action', 'invalid_input', 'invalid_output', 'permission_denied', "
             "'execution_failed', 'action_timeout', 'retries_exhausted', 'worker_interrupted', "
-            "'cancelled', 'reconciliation_required', 'approval_rejected')",
+            "'cancelled', 'reconciliation_required', 'approval_rejected', 'field_not_found', "
+            "'invalid_json', 'destination_rejected', 'http_timeout', 'http_connection_error', "
+            "'http_status_error', 'size_limit', 'invalid_comparison')",
             name="ck_step_attempt_error_category",
         ),
         Index("ix_step_attempts_step", "step_run_id", "attempt_number"),

@@ -30,8 +30,10 @@ async function createTextWorkflow(page: Page, name: string) {
   await page.locator("#step-0-value").fill("hello agentflow");
   await page.getByRole("button", { name: "Add another step" }).click();
   await page.locator("#step-action-1").selectOption("uppercase");
-  await page.getByLabel("Use output from an earlier step").check();
-  await page.getByLabel("Output source for value").selectOption("step_1");
+  await page
+    .getByLabel("Reference source for value")
+    .selectOption("step:step_1");
+  await page.getByLabel("Output path for value").fill("/value");
   await expect(
     page.locator(".preview-item .preview-node").nth(1),
   ).toContainText("Uses output from step 1");
@@ -55,6 +57,25 @@ async function createAccount(
   await expect(page.locator(".success-alert")).toContainText(
     "Account created.",
   );
+}
+
+async function createAndRunExample(
+  page: Page,
+  name: string,
+  inputs: Record<string, string>,
+) {
+  await page.goto("/workflows");
+  const card = page.locator(".concept-grid article").filter({ hasText: name });
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Add to my workflows" }).click();
+  await expect(page.getByRole("heading", { name })).toBeVisible();
+  await page.getByRole("button", { name: "Run workflow" }).click();
+  for (const [field, value] of Object.entries(inputs)) {
+    await page.locator(`#run-input-${field}`).fill(value);
+  }
+  await page.getByRole("button", { name: "Start workflow" }).click();
+  await expect(page).toHaveURL(/\/runs\/\d+$/);
+  return Number(page.url().match(/runs\/(\d+)/)?.[1]);
 }
 
 test("visual workflow journey, persisted run details, roles, approvals, audit, and responsive navigation", async ({
@@ -166,6 +187,23 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
     "HELLO AGENTFLOW",
   );
 
+  await page.goto("/workflows/new");
+  await page.getByLabel("Workflow name").fill("Conditional visual workflow");
+  await page.getByRole("button", { name: "Add condition" }).click();
+  await page.getByLabel("Left value").fill("approved");
+  await page.getByLabel("Right value").fill("approved");
+  await page.getByLabel("When true").fill("accepted");
+  await page.getByLabel("When false").fill("rejected");
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  await page
+    .getByRole("row")
+    .filter({ hasText: "Conditional visual workflow" })
+    .getByRole("button", { name: "Run" })
+    .click();
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".workflow-output")).toContainText("accepted");
+  await expect(page.locator(".timeline-step")).toHaveCount(3);
+
   // Server validation remains authoritative even though the visual form prevents this invalid definition.
   const authResponse = await page.request.get(
     `${process.env.E2E_API_URL}/api/auth/me`,
@@ -193,12 +231,7 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
         version: 1,
         name: "Safe runtime failure",
         steps: [
-          { id: "number", action: "set_value", inputs: { value: 42 } },
-          {
-            id: "uppercase",
-            action: "uppercase",
-            inputs: { value: { $ref: "number" } },
-          },
+          { id: "bad_json", action: "parse_json", inputs: { value: "{bad" } },
         ],
       },
       headers: {
@@ -218,7 +251,7 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
     .getByRole("button", { name: "Run" })
     .click();
   await expect(page.locator(".run-state").first()).toHaveText("failed");
-  await expect(page.locator(".run-detail")).toContainText("invalid_input");
+  await expect(page.locator(".run-detail")).toContainText("invalid_json");
   await expect(page.locator(".run-detail")).not.toContainText("Traceback");
   expect(runtimeFailure.id).toBeGreaterThan(0);
   await expect(page.getByRole("link", { name: "Audit history" })).toBeVisible();
@@ -240,6 +273,63 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
     "approver",
     "phase6approver@example.test",
   );
+
+  // The API-backed templates are runnable definitions and must not seed sample execution history.
+  const customerRun = await createAndRunExample(page, "Customer validation", {
+    customer: JSON.stringify({ name: "Ada", email: "ada@example.test" }),
+  });
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".workflow-output")).toContainText("valid");
+  await expect(page.locator(".timeline-step")).toHaveCount(6);
+  await page.reload();
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  expect(customerRun).toBeGreaterThan(0);
+
+  await createAndRunExample(page, "API data processing", {
+    api_url: "http://127.0.0.1:18002/data",
+  });
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".workflow-output")).toContainText("5");
+  await createAndRunExample(page, "Data cleaning pipeline", {
+    records: JSON.stringify([
+      {
+        active: true,
+        name: " Kept ",
+        email: " keep@example.test ",
+        amount: 2,
+      },
+      {
+        active: false,
+        name: "Removed",
+        email: "remove@example.test",
+        amount: 3,
+      },
+      { active: true, name: "Missing fields", amount: 7 },
+    ]),
+  });
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".workflow-output")).toContainText("Kept");
+
+  const approvalExampleRun = await createAndRunExample(page, "Human approval", {
+    request: JSON.stringify({ operation: "delete", resource: "sample" }),
+  });
+  await expect(page.locator(".run-state").first()).toHaveText(
+    "awaiting approval",
+  );
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6approver", "Browser-test-password-2026!");
+  await page.goto("/approvals");
+  const templateApproval = page
+    .locator(".approval-card")
+    .filter({ hasText: `run #${approvalExampleRun}` })
+    .first();
+  await expect(templateApproval).toBeVisible();
+  await templateApproval.getByRole("button", { name: "Approve" }).click();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6admin");
+  await page.goto(`/runs/${approvalExampleRun}`);
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+
   await page.getByRole("button", { name: "Sign out" }).click();
   await signIn(page, "phase6operator", "Browser-test-password-2026!");
   await expect(page.getByRole("link", { name: "Audit history" })).toHaveCount(

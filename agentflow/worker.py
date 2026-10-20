@@ -33,9 +33,19 @@ from agentflow.models import (
     WorkflowVersion,
     transition_status,
 )
-from agentflow.registry import action_requires_approval, action_spec, action_timeout
+from agentflow.registry import (
+    ActionErrorCategory,
+    action_requires_approval,
+    action_spec,
+    action_timeout,
+)
 from agentflow.security import canonical_hash
-from agentflow.workflows import validate_definition
+from agentflow.workflows import (
+    ConditionalDefinition,
+    StepDefinition,
+    WorkflowDefinition,
+    validate_definition,
+)
 
 LEASE_SECONDS = 30
 POLL_SECONDS = 0.5
@@ -60,6 +70,49 @@ class ActionOutcome:
     output: dict | None = None
     error: str | None = None
     category: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutableStep:
+    step: StepDefinition
+    logical_id: str
+    condition_root: bool = False
+    branch_parent: str | None = None
+    branch_value: bool | None = None
+    branch_last: bool = False
+
+
+def _flatten_steps(definition: WorkflowDefinition) -> list[ExecutableStep]:
+    result: list[ExecutableStep] = []
+    for item in definition.steps:
+        if isinstance(item, ConditionalDefinition):
+            condition_step = StepDefinition(
+                id=item.id,
+                action="compare_values",
+                inputs=item.condition,
+            )
+            result.append(ExecutableStep(condition_step, item.id, condition_root=True))
+            for branch_name, branch_value, branch_steps in (
+                ("then", True, item.then_steps),
+                ("else", False, item.else_steps),
+            ):
+                for index, branch_step in enumerate(branch_steps):
+                    result.append(
+                        ExecutableStep(
+                            step=StepDefinition(
+                                id=f"{item.id}__{branch_name}__{branch_step.id}",
+                                action=branch_step.action,
+                                inputs=branch_step.inputs,
+                            ),
+                            logical_id=branch_step.id,
+                            branch_parent=item.id,
+                            branch_value=branch_value,
+                            branch_last=index == len(branch_steps) - 1,
+                        )
+                    )
+        else:
+            result.append(ExecutableStep(item, item.id))
+    return result
 
 
 def claim_job(
@@ -257,12 +310,13 @@ def _invoke_action(
     if response.get("ok") is True and isinstance(response.get("output"), dict):
         return ActionOutcome("succeeded", output=response["output"])
     category = response.get("category")
-    allowed = {
-        "unknown_action",
-        "invalid_input",
-        "invalid_output",
-        "permission_denied",
-        "execution_failed",
+    allowed = {item.value for item in ActionErrorCategory} | {
+        "action_timeout",
+        "retries_exhausted",
+        "worker_interrupted",
+        "cancelled",
+        "reconciliation_required",
+        "approval_rejected",
     }
     if category not in allowed:
         category = "execution_failed"
@@ -327,6 +381,47 @@ def _check_cancelled(session_factory: sessionmaker, run_id: int) -> bool:
     with session_factory() as session:
         run = session.get(WorkflowRun, run_id)
         return bool(run and run.status == RunStatus.CANCEL_REQUESTED)
+
+
+def _resolve_json_pointer(value, pointer: str):
+    current = value
+    if not pointer:
+        return current
+    if not pointer.startswith("/"):
+        raise ValueError("reference path must be a JSON Pointer")
+    for raw in pointer[1:].split("/"):
+        if "~" in raw and any(char not in "01" for char in raw.split("~")[1:]):
+            raise ValueError("reference path contains an invalid escape")
+        key = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif isinstance(current, list) and key.isdigit() and int(key) < len(current):
+            current = current[int(key)]
+        else:
+            raise ValueError("referenced workflow value does not exist")
+    return current
+
+
+def _resolve_value(value, outputs: dict[str, dict], workflow_input: dict):
+    if isinstance(value, dict):
+        if "$ref" in value:
+            reference = value["$ref"]
+            if isinstance(reference, str):
+                step_id, pointer = reference, "/value"
+            else:
+                step_id, pointer = reference["step"], reference["path"]
+            return _resolve_json_pointer(outputs[step_id], pointer)
+        if "$input" in value:
+            reference = value["$input"]
+            if isinstance(reference, str):
+                name, pointer = reference, ""
+            else:
+                name, pointer = reference["name"], reference["path"]
+            return _resolve_json_pointer(workflow_input[name], pointer)
+        return {key: _resolve_value(item, outputs, workflow_input) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_value(item, outputs, workflow_input) for item in value]
+    return value
 
 
 def _recover_interrupted_attempt(
@@ -549,7 +644,9 @@ def process_claimed_job(
         session.commit()
 
         outputs: dict[str, dict] = {}
-        for order, step_definition in enumerate(definition.steps):
+        executable_steps = _flatten_steps(definition)
+        for order, executable in enumerate(executable_steps):
+            step_definition = executable.step
             if not _claim_is_current(session, claim):
                 session.rollback()
                 return
@@ -568,17 +665,60 @@ def process_claimed_job(
                     StepRun.run_id == run.id, StepRun.step_id == step_definition.id
                 )
             )
+            if executable.branch_parent is not None:
+                condition_run = session.scalar(
+                    select(StepRun).where(
+                        StepRun.run_id == run.id,
+                        StepRun.step_id == executable.branch_parent,
+                    )
+                )
+                decision = (
+                    bool((condition_run.output or {}).get("decision")) if condition_run else False
+                )
+                if condition_run is None or condition_run.status != StepStatus.SUCCEEDED:
+                    run.status = RunStatus.FAILED
+                    run.error = "Conditional decision was not persisted."
+                    run.error_category = "execution_failed"
+                    run.finished_at = now()
+                    _finish_job(session, claim, "failed")
+                    session.commit()
+                    return
+                if decision is not executable.branch_value:
+                    if step is None:
+                        step = StepRun(
+                            run_id=run.id,
+                            step_id=step_definition.id,
+                            step_order=order,
+                            action=step_definition.action,
+                            status=StepStatus.SKIPPED,
+                            inputs={},
+                            finished_at=now(),
+                        )
+                        session.add(step)
+                        record_event(
+                            session,
+                            "step.skipped",
+                            actor_kind="worker",
+                            resource_type="step",
+                            resource_id=step_definition.id,
+                            workflow_id=run.workflow_id,
+                            run_id=run.id,
+                            outcome="skipped",
+                            correlation_id=f"run:{run.id}",
+                            details={"step_id": step_definition.id, "branch": "not_selected"},
+                        )
+                        session.commit()
+                    continue
             if step is not None and step.status == StepStatus.SUCCEEDED:
                 outputs[step.step_id] = step.output or {}
+                outputs[executable.logical_id] = step.output or {}
                 continue
             if step is not None and _recover_interrupted_attempt(session, claim, run, step):
                 session.commit()
                 return
             if step is None:
                 inputs = {
-                    key: outputs[value["$ref"]]["value"]
-                    if isinstance(value, dict) and "$ref" in value
-                    else value
+                    key: _resolve_value(value, outputs, run.input or {})
                     for key, value in step_definition.inputs.items()
                 }
                 step = StepRun(
@@ -655,12 +795,85 @@ def process_claimed_job(
 
             if outcome.status == "succeeded":
                 attempt.status = "succeeded"
-                attempt.output = outcome.output
+                persisted_output = outcome.output or {}
+                if executable.condition_root:
+                    persisted_output = {
+                        **persisted_output,
+                        "decision": bool((persisted_output.get("value") or {}).get("result")),
+                    }
+                attempt.output = persisted_output
                 attempt.finished_at = now()
-                step.output = outcome.output
+                step.output = persisted_output
                 step.status = transition_status(step.status, StepStatus.SUCCEEDED, entity="step")
                 step.finished_at = now()
-                outputs[step.step_id] = outcome.output or {}
+                outputs[step.step_id] = persisted_output
+                outputs[executable.logical_id] = persisted_output
+                if executable.condition_root:
+                    decision = persisted_output["decision"]
+                    for branch_order, branch_step in enumerate(
+                        executable_steps[order + 1 :], start=order + 1
+                    ):
+                        if (
+                            branch_step.branch_parent != executable.logical_id
+                            or branch_step.branch_value is decision
+                        ):
+                            continue
+                        existing = session.scalar(
+                            select(StepRun).where(
+                                StepRun.run_id == run.id,
+                                StepRun.step_id == branch_step.step.id,
+                            )
+                        )
+                        if existing is None:
+                            skipped = StepRun(
+                                run_id=run.id,
+                                step_id=branch_step.step.id,
+                                step_order=branch_order,
+                                action=branch_step.step.action,
+                                status=StepStatus.SKIPPED,
+                                inputs={},
+                                finished_at=now(),
+                            )
+                            session.add(skipped)
+                            record_event(
+                                session,
+                                "step.skipped",
+                                actor_kind="worker",
+                                resource_type="step",
+                                resource_id=branch_step.step.id,
+                                workflow_id=run.workflow_id,
+                                run_id=run.id,
+                                outcome="skipped",
+                                correlation_id=f"run:{run.id}",
+                                details={"step_id": branch_step.step.id, "branch": "not_selected"},
+                            )
+                if executable.branch_last and executable.branch_parent:
+                    condition_run = session.scalar(
+                        select(StepRun).where(
+                            StepRun.run_id == run.id,
+                            StepRun.step_id == executable.branch_parent,
+                        )
+                    )
+                    if condition_run is not None:
+                        condition_output = dict(condition_run.output or {})
+                        condition_output["condition"] = condition_output.get("value")
+                        condition_output["value"] = persisted_output.get("value")
+                        condition_output["selected_output"] = persisted_output
+                        condition_run.output = condition_output
+                        if condition_run.attempts:
+                            condition_run.attempts[-1].output = condition_output
+                        outputs[executable.branch_parent] = condition_output
+                        record_event(
+                            session,
+                            "condition.branch_completed",
+                            actor_kind="worker",
+                            resource_type="step",
+                            resource_id=condition_run.id,
+                            workflow_id=run.workflow_id,
+                            run_id=run.id,
+                            outcome="then" if executable.branch_value else "else",
+                            correlation_id=f"run:{run.id}",
+                        )
                 record_event(
                     session,
                     "step.succeeded",

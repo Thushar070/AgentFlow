@@ -3,7 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,20 +13,25 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from agentflow.execution import enqueue_workflow
 from agentflow.models import (
+    ApprovalRequest,
+    AuditEvent,
     Base,
     InvalidTransition,
     RunStatus,
+    StepAttempt,
     StepRun,
+    User,
     Workflow,
     WorkflowJob,
     WorkflowRun,
     WorkflowVersion,
     transition_status,
+    utcnow,
 )
 from agentflow.worker import ActionOutcome, claim_job, process_claimed_job
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = "f4c2e1a91b07"
+REVISION = "d142f6a8c903"
 
 
 def run_migration(database_url: str, revision: str = "head"):
@@ -196,6 +201,119 @@ def test_phase1_migration_preserves_workflows_runs_and_steps(tmp_path):
             (22, "upper", 1, "succeeded", '{"value":"KEPT"}'),
             (23, "interrupted", 0, "failed", None),
         ]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_populated_phase5_copy_preserves_runs_attempts_approvals_and_audit(tmp_path):
+    database = tmp_path / "phase5-populated.db"
+    url = sqlite_url(database)
+    run_migration(url, "f4c2e1a91b07")
+    engine = create_engine(url)
+    timestamp = utcnow()
+    with Session(engine) as session:
+        user = User(
+            username="migrationadmin",
+            username_normalized="migrationadmin",
+            email="migrationadmin@example.test",
+            email_normalized="migrationadmin@example.test",
+            password_hash="test-only-hash",
+            role="admin",
+            is_active=True,
+        )
+        workflow = Workflow(name="Preserved workflow")
+        session.add_all([user, workflow])
+        session.flush()
+        version = WorkflowVersion(
+            workflow_id=workflow.id,
+            version_number=1,
+            definition={"version": 1, "name": "Preserved workflow", "steps": []},
+        )
+        session.add(version)
+        session.flush()
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            workflow_version_id=version.id,
+            status="succeeded",
+            input={"source": "kept"},
+            output={"value": "kept"},
+            created_by_id=user.id,
+        )
+        session.add(run)
+        session.flush()
+        step = StepRun(
+            run_id=run.id,
+            step_id="source",
+            step_order=0,
+            action="set_value",
+            status="succeeded",
+            inputs={"value": "kept"},
+            output={"value": "kept"},
+            started_at=timestamp,
+            finished_at=timestamp,
+        )
+        session.add(step)
+        session.flush()
+        session.add_all(
+            [
+                StepAttempt(
+                    step_run_id=step.id,
+                    attempt_number=1,
+                    status="succeeded",
+                    output={"value": "kept"},
+                    started_at=timestamp,
+                    finished_at=timestamp,
+                ),
+                WorkflowJob(run_id=run.id, status="succeeded", attempts=1),
+                ApprovalRequest(
+                    run_id=run.id,
+                    step_run_id=step.id,
+                    workflow_version_id=version.id,
+                    action="set_value",
+                    inputs_hash="a" * 64,
+                    requester_id=user.id,
+                    status="approved",
+                    decided_by_id=user.id,
+                    decided_at=timestamp,
+                    expires_at=timestamp + timedelta(days=1),
+                ),
+                AuditEvent(
+                    event_type="run.succeeded",
+                    actor_user_id=user.id,
+                    actor_kind="user",
+                    resource_type="run",
+                    resource_id=str(run.id),
+                    workflow_id=workflow.id,
+                    run_id=run.id,
+                    outcome="succeeded",
+                    correlation_id="migration-test",
+                    details={"preserved": True},
+                ),
+            ]
+        )
+        session.commit()
+        run_id = run.id
+    engine.dispose()
+
+    run_migration(url)
+    run_migration(url)
+    with sqlite3.connect(database) as connection:
+        for table in (
+            "workflows",
+            "workflow_versions",
+            "workflow_runs",
+            "step_runs",
+            "step_attempts",
+            "workflow_jobs",
+            "approval_requests",
+            "audit_events",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT output FROM workflow_runs WHERE id=?", (run_id,)).fetchone()[
+                0
+            ]
+            == '{"value": "kept"}'
+        )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,8 +22,9 @@ from agentflow.auth_routes import admin_router
 from agentflow.auth_routes import router as auth_router
 from agentflow.authorization import get_owned_run, get_owned_workflow
 from agentflow.config import get_settings
-from agentflow.contracts import RunResponse, WorkflowResponse, WorkflowVersionResponse
+from agentflow.contracts import RunRequest, RunResponse, WorkflowResponse, WorkflowVersionResponse
 from agentflow.database import engine, get_session
+from agentflow.examples import list_examples
 from agentflow.execution import enqueue_workflow
 from agentflow.models import (
     AuditEvent,
@@ -38,7 +39,12 @@ from agentflow.models import (
 )
 from agentflow.registry import ACTION_REGISTRY, action_catalog
 from agentflow.security import RequestLimitMiddleware, redact, redact_text
-from agentflow.workflows import WorkflowDefinition, validate_definition
+from agentflow.workflows import (
+    WorkflowDefinition,
+    executable_step_count,
+    validate_definition,
+    validate_run_input,
+)
 
 
 def _migration_head() -> str | None:
@@ -137,8 +143,14 @@ def health(session: Session = Depends(get_session)):
 
 
 @app.get("/api/actions")
-def list_actions():
+def list_actions(_actor: User = Depends(require_user)):
     return action_catalog()
+
+
+@app.get("/api/examples")
+def get_workflow_examples(_actor: User = Depends(require_user)):
+    """Return editable example definitions without creating workflow/run rows."""
+    return list_examples()
 
 
 def serialize_workflow(workflow: Workflow) -> dict:
@@ -156,7 +168,7 @@ def serialize_workflow(workflow: Workflow) -> dict:
 
 
 def serialize_run(run: WorkflowRun) -> dict:
-    total_steps = len(run.workflow_version.definition.get("steps", []))
+    total_steps = executable_step_count(validate_definition(run.workflow_version.definition))
     succeeded_steps = sum(step.status == "succeeded" for step in run.steps)
     failed_steps = sum(step.status == "failed" for step in run.steps)
     return {
@@ -235,6 +247,20 @@ def persist_workflow_version(
     request: Request,
 ) -> Workflow:
     data = definition.model_dump(mode="json", exclude_none=True)
+    if not data.get("input_schema"):
+        data.pop("input_schema", None)
+
+    def omit_legacy_action_tag(value):
+        if isinstance(value, dict):
+            if value.get("type") == "action":
+                value.pop("type")
+            for child in value.values():
+                omit_legacy_action_tag(child)
+        elif isinstance(value, list):
+            for child in value:
+                omit_legacy_action_tag(child)
+
+    omit_legacy_action_tag(data)
     if workflow is None:
         workflow = Workflow(
             name=definition.name, description=definition.description, owner_id=actor.id
@@ -352,6 +378,7 @@ def start_run_for_version(
     idempotency_key: str | None,
     actor: User,
     request: Request,
+    run_input: dict | None = None,
 ) -> dict:
     workflow = get_owned_workflow(session, workflow_id, actor, request, write=True)
     if idempotency_key:
@@ -367,6 +394,11 @@ def start_run_for_version(
             )
         )
         if existing is not None:
+            if existing.input != (run_input or {}):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was already used with different run input.",
+                )
             record_event(
                 session,
                 "run.idempotency_replayed",
@@ -408,14 +440,19 @@ def start_run_for_version(
         if version is None:
             raise HTTPException(status_code=404, detail="Workflow version not found")
     try:
+        selected_definition = validate_definition(version.definition)
+        validated_input = validate_run_input(selected_definition, run_input)
         run = enqueue_workflow(
             session,
             workflow,
             version,
             idempotency_key=idempotency_key,
+            run_input=validated_input,
             created_by_id=actor.id,
             correlation_id=correlation_id(request),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=redact_text(str(exc))) from exc
     except SQLAlchemyError as exc:
         session.rollback()
         raise HTTPException(
@@ -429,6 +466,7 @@ def start_run_for_version(
 def start_run(
     workflow_id: int,
     request: Request,
+    payload: RunRequest | None = Body(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
     session: Session = Depends(get_session),
     actor: User = Depends(require_roles("admin", "operator")),
@@ -437,7 +475,15 @@ def start_run(
         not idempotency_key or idempotency_key.strip() != idempotency_key
     ):
         raise HTTPException(status_code=422, detail="Idempotency-Key must be non-empty and trimmed")
-    return start_run_for_version(workflow_id, None, session, idempotency_key, actor, request)
+    return start_run_for_version(
+        workflow_id,
+        None,
+        session,
+        idempotency_key,
+        actor,
+        request,
+        payload.input if payload else {},
+    )
 
 
 @app.post(
@@ -449,6 +495,7 @@ def start_version_run(
     workflow_id: int,
     version_number: int,
     request: Request,
+    payload: RunRequest | None = Body(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
     session: Session = Depends(get_session),
     actor: User = Depends(require_roles("admin", "operator")),
@@ -458,7 +505,13 @@ def start_version_run(
     ):
         raise HTTPException(status_code=422, detail="Idempotency-Key must be non-empty and trimmed")
     return start_run_for_version(
-        workflow_id, version_number, session, idempotency_key, actor, request
+        workflow_id,
+        version_number,
+        session,
+        idempotency_key,
+        actor,
+        request,
+        payload.input if payload else {},
     )
 
 

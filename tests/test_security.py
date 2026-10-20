@@ -89,7 +89,8 @@ def test_unauthenticated_routes_and_passwords_are_protected(client):
     anon = TestClient(main_module.app, raise_server_exceptions=False)
     anon.headers.update({"Origin": ORIGIN})
     assert anon.get("/health").status_code == 200
-    assert anon.get("/api/actions").status_code == 200
+    assert anon.get("/api/actions").status_code == 401
+    assert anon.get("/api/examples").status_code == 401
     assert anon.get("/api/workflows").status_code == 401
     assert anon.post("/api/auth/register", json={}).status_code == 404
     assert anon.post("/api/admin/users", json={}).status_code == 401

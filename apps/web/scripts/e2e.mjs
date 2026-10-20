@@ -12,6 +12,7 @@ const isolatedWebRoot = resolve(scratch, "web");
 const databasePath = resolve(scratch, "agentflow.db");
 const apiPort = "18001";
 const webPort = "13000";
+const mockPort = "18002";
 const apiUrl = `http://localhost:${apiPort}`;
 const webUrl = `http://localhost:${webPort}`;
 const password = "E2E-only.AgentFlow!2026";
@@ -23,6 +24,9 @@ const runtimeEnv = {
   API_PORT: apiPort,
   CORS_ORIGINS: JSON.stringify([webUrl]),
   SESSION_COOKIE_SECURE: "false",
+  APP_ENV: "test",
+  HTTP_ALLOWED_HOSTS: JSON.stringify(["127.0.0.1"]),
+  HTTP_ALLOWED_PORTS: JSON.stringify([Number(mockPort)]),
   APPROVAL_REQUIRED_ACTIONS: JSON.stringify(["append"]),
   NEXT_PUBLIC_API_URL: apiUrl,
   E2E_WEB_URL: webUrl,
@@ -160,6 +164,7 @@ let completed = false;
 try {
   await assertPortAvailable(Number(apiPort));
   await assertPortAvailable(Number(webPort));
+  await assertPortAvailable(Number(mockPort));
   run(python, ["-m", "alembic", "upgrade", "head"]);
   run(python, [
     "-c",
@@ -177,6 +182,15 @@ try {
   ]);
 
   prepareIsolatedWeb();
+  const mockServer = start(
+    process.execPath,
+    [
+      "-e",
+      `require("node:http").createServer((request, response) => { response.writeHead(200, {"content-type":"application/json"}); response.end(JSON.stringify({items:[{active:true,name:"A"},{active:false,name:"B"}],amounts:[2,3]})); }).listen(${mockPort}, "127.0.0.1");`,
+    ],
+    root,
+  );
+  await waitFor(`http://127.0.0.1:${mockPort}`, mockServer, "mock API");
   const api = start(
     python,
     [
