@@ -1,6 +1,6 @@
 # AgentFlow
 
-AgentFlow is a deterministic workflow platform. This initial vertical slice lets you define validated, sequential workflows, run a bounded set of registered actions, and inspect persisted step results from a small web dashboard. It works without an AI service.
+AgentFlow is a deterministic workflow platform. The browser dashboard supports secure sign-in, role-aware workflow management, immutable workflow versions, durable execution, approvals, run/step/attempt inspection, and administrator audit history. It works without an AI service.
 
 ## Local setup
 
@@ -17,11 +17,30 @@ cd apps/web && npm ci && cd ../..
 alembic upgrade head
 ```
 
-Start the API and dashboard in separate terminals:
+### Start a disposable local instance
+
+To avoid using or migrating the repository's `agentflow.db`, point every backend command at a disposable database. In a terminal from the repository root:
+
+```sh
+export DATABASE_URL=sqlite:////tmp/agentflow-phase6.db
+alembic upgrade head
+python -m agentflow.admin bootstrap-admin
+```
+
+The bootstrap command creates the initial administrator interactively. Use the same database URL in each backend terminal. Start the API:
 
 ```sh
 python -m agentflow
 ```
+
+Start the background worker in another terminal:
+
+```sh
+export DATABASE_URL=sqlite:////tmp/agentflow-phase6.db
+python -m agentflow.worker
+```
+
+Start the dashboard in a third terminal (the frontend API URL is read at startup):
 
 ```sh
 cd apps/web && npm run dev
@@ -29,13 +48,13 @@ cd apps/web && npm run dev
 
 Open <http://localhost:3000>. The API health endpoint is <http://localhost:8001/health>; interactive API docs are at <http://localhost:8001/docs>. Run `alembic upgrade head` (or `make migrate`) before starting the API. Application startup checks the current schema revision and fails with a migration command if it is behind; it does not create or reset database tables. Alembic and the API read the same `DATABASE_URL` setting; the frontend's `NEXT_PUBLIC_API_URL` must point to the same API port.
 
-After migration, create the first administrator from a local terminal:
+After sign-in, use the left navigation to move between Dashboard, Workflows, Runs, Approvals, and (for administrators) Audit history and Accounts. The Dashboard summarizes accessible workflows and recent persisted runs. Its **Run Text Transformation** tutorial creates or reuses the example workflow, runs it through the real queue and worker, and saves the output; it does not create a duplicate on each dashboard visit. You can skip the example and build your own workflow at **Workflows → Create workflow**.
 
-```sh
-python -m agentflow.admin bootstrap-admin
-```
+The visual builder asks for a name, optional description, and ordered action steps. Choose from the API's registered action catalog, configure its schema-backed fields, and reorder or remove steps. For string inputs, a later step can select an earlier step's output. The preview shows the current sequence and generated version 1 definition. **Advanced: view JSON** is a read-only view of the compatible definition; ordinary creation and editing do not require JSON. The server remains authoritative for validation. Editing a saved workflow creates a new immutable version, so earlier runs continue to reference the definition they used.
 
-The command prompts for username, email, and a password twice without echoing it. It accepts no password arguments, refuses to proceed when an active administrator exists, and does not create a default credential. Sign in through the dashboard, then create operator or approver accounts from the administrator panel. There is no public registration route. For recovery, a local OS operator may run `python -m agentflow.admin reset-admin-password ADMIN_USERNAME`; this prompts interactively and revokes that administrator's sessions. Protect the database file and restrict local shell access.
+The registered actions are **Set a value** (provide a scalar starting value), **Convert to uppercase** (convert text), and **Append text** (add a suffix to text). Start a saved workflow from its list row or detail page. The run detail page shows its saved version, status, timestamps, step inputs and outputs, safe errors, and persisted attempt/retry history. Runs are saved by the API and worker, so refreshing the page retains their results. Authorized users can cancel eligible runs. Sensitive configured actions remain blocked until an eligible approver records a decision; the approval page shows its workflow, run, action, and safe inputs. Administrators can inspect structured audit events and create operator, approver, or admin accounts. Workflow deletion is not supported by the API and is therefore not exposed in the dashboard.
+
+The bootstrap command prompts for username, email, and a password twice without echoing it. It accepts no password arguments, refuses to proceed when an active administrator exists, and does not create a default credential. Sign in through the dashboard, then create operator or approver accounts from the administrator panel. There is no public registration route. For recovery, a local OS operator may run `python -m agentflow.admin reset-admin-password ADMIN_USERNAME`; this prompts interactively and revokes that administrator's sessions. Protect the database file and restrict local shell access.
 
 Session cookies are opaque, stored only as hashes, `HttpOnly`, and `SameSite=Lax`. `SESSION_COOKIE_SECURE` defaults to `true`; set it to `false` only for local HTTP development (the example `.env` does this). Enable it behind HTTPS in every deployed environment. Browser state-changing requests require an allowed `Origin` and a session-bound CSRF token. Set `CORS_ORIGINS` to the exact dashboard origins. Sessions expire after `SESSION_TTL_HOURS` (12 by default); sign-out and password changes revoke sessions.
 
@@ -85,7 +104,10 @@ pytest
 ruff check agentflow tests
 ruff format --check agentflow tests
 cd apps/web && npm run lint && npm run typecheck && npm run format:check && npm run build
+cd apps/web && npm run test:e2e
 ```
+
+The browser journey requires the repository `.venv`, installed web dependencies, Google Chrome at `/usr/bin/google-chrome` (or `PLAYWRIGHT_CHROME_PATH`), and the isolated ports 13000 and 18001. It creates a fresh temporary SQLite database, migrates it through the current Alembic head, seeds only a test administrator, then starts the API, frontend, and worker as needed. It does not use `agentflow.db` or the local development services. Successful runs remove their temporary files; failed runs retain the database and Playwright artifacts under `/tmp/agentflow-phase6-e2e-*` for diagnosis.
 
 ## Architecture and next steps
 

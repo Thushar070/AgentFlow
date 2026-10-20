@@ -1,0 +1,386 @@
+import { expect, test, type Page } from "@playwright/test";
+import { spawn, type ChildProcess } from "node:child_process";
+
+const password = process.env.E2E_PASSWORD ?? "E2E-only.AgentFlow!2026";
+let worker: ChildProcess | undefined;
+
+test.afterAll(() => {
+  if (worker && worker.exitCode === null) worker.kill("SIGTERM");
+});
+
+async function signIn(page: Page, username: string, pass = password) {
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await page.getByLabel("Username or email").fill(username);
+  await page.getByLabel("Password").fill(pass);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(
+    page.getByRole("heading", { name: `Welcome, ${username}` }),
+  ).toBeVisible();
+  await expect(page.getByText("API connected")).toBeVisible();
+}
+
+async function createTextWorkflow(page: Page, name: string) {
+  await page.goto("/workflows/new");
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  await expect(page.locator(".validation-summary")).toContainText(
+    "Enter a workflow name.",
+  );
+  await page.getByLabel("Workflow name").fill(name);
+  await page.getByRole("button", { name: "Set a value" }).click();
+  await page.locator("#step-0-value").fill("hello agentflow");
+  await page.getByRole("button", { name: "Add another step" }).click();
+  await page.locator("#step-action-1").selectOption("uppercase");
+  await page.getByLabel("Use output from an earlier step").check();
+  await page.getByLabel("Output source for value").selectOption("step_1");
+  await expect(
+    page.locator(".preview-item .preview-node").nth(1),
+  ).toContainText("Uses output from step 1");
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  await expect(page).toHaveURL(/\/workflows$/);
+  await expect(page.getByRole("link", { name })).toBeVisible();
+}
+
+async function createAccount(
+  page: Page,
+  username: string,
+  role: string,
+  email: string,
+) {
+  await page.goto("/accounts");
+  await page.getByLabel("Username", { exact: true }).fill(username);
+  await page.getByLabel("Email", { exact: true }).fill(email);
+  await page.getByLabel("Initial password").fill("Browser-test-password-2026!");
+  await page.getByLabel("Role", { exact: true }).selectOption(role);
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.locator(".success-alert")).toContainText(
+    "Account created.",
+  );
+}
+
+test("visual workflow journey, persisted run details, roles, approvals, audit, and responsive navigation", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Create workflow" })).toHaveCount(
+    0,
+  );
+  const denied = await page.request.get(
+    `${process.env.E2E_API_URL}/api/workflows`,
+  );
+  expect(denied.status()).toBe(401);
+  await signIn(page, "phase6admin");
+
+  // A lost API connection leaves the app recoverable and preserves the browser session.
+  await page.route(`${process.env.E2E_API_URL}/**`, (route) => route.abort());
+  await page.reload();
+  await expect(page.getByText("API unavailable")).toBeVisible();
+  await page.unrouteAll();
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Welcome, phase6admin" }),
+  ).toBeVisible();
+
+  await createTextWorkflow(page, "Cancel before worker");
+  await page
+    .getByRole("row")
+    .filter({ hasText: "Cancel before worker" })
+    .getByRole("button", { name: "Run" })
+    .click();
+  await expect(page.locator(".run-state").first()).toHaveText("queued");
+  await page.getByRole("button", { name: "Cancel run" }).click();
+  await expect(page.locator(".run-state").first()).toHaveText("cancelled");
+
+  worker = spawn(process.env.E2E_PYTHON!, ["-m", "agentflow.worker"], {
+    cwd: process.env.E2E_ROOT,
+    env: process.env,
+    stdio: "ignore",
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
+  expect(worker.exitCode).toBeNull();
+
+  await page.goto("/dashboard");
+  await page.getByRole("button", { name: "Run Text Transformation" }).click();
+  await expect(page).toHaveURL(/\/runs\/\d+$/);
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".io-grid").last()).toContainText(
+    "HELLO AGENTFLOW",
+  );
+  await page.goto("/dashboard");
+  await page.reload();
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.screenshot({
+    path: "/tmp/agentflow-ux-1920x1080.png",
+    fullPage: false,
+  });
+  const tutorialCount = await page.request.get(
+    `${process.env.E2E_API_URL}/api/workflows`,
+  );
+  const tutorialWorkflows = (await tutorialCount.json()) as { name: string }[];
+  expect(
+    tutorialWorkflows.filter((item) => item.name === "Text Transformation"),
+  ).toHaveLength(1);
+  await page.getByRole("button", { name: "Dismiss getting started" }).click();
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "See AgentFlow in action" }),
+  ).toHaveCount(0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await createTextWorkflow(page, "Visual text workflow");
+  const workflowRow = page
+    .getByRole("row")
+    .filter({ hasText: "Visual text workflow" });
+  await expect(workflowRow).toContainText("v1");
+  await workflowRow.getByRole("button", { name: "Edit" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Edit workflow" }),
+  ).toBeVisible();
+  await page
+    .locator("#workflow-description")
+    .fill("Second immutable version created from visual forms.");
+  await page.getByRole("button", { name: "Save new version" }).click();
+  await expect(
+    page.getByRole("row").filter({ hasText: "Visual text workflow" }),
+  ).toContainText("v2");
+
+  await page
+    .getByRole("row")
+    .filter({ hasText: "Visual text workflow" })
+    .getByRole("button", { name: "Run" })
+    .click();
+  await expect(page).toHaveURL(/\/runs\/\d+$/);
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".io-grid").last()).toContainText(
+    "HELLO AGENTFLOW",
+  );
+  await expect(page.locator(".timeline-step")).toHaveCount(2);
+  await page.screenshot({
+    path: "/tmp/agentflow-ux-1440x900.png",
+    fullPage: false,
+  });
+  await page.reload();
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".io-grid").last()).toContainText(
+    "HELLO AGENTFLOW",
+  );
+
+  // Server validation remains authoritative even though the visual form prevents this invalid definition.
+  const authResponse = await page.request.get(
+    `${process.env.E2E_API_URL}/api/auth/me`,
+  );
+  const auth = (await authResponse.json()) as { csrf_token: string };
+  const invalidWorkflow = await page.request.post(
+    `${process.env.E2E_API_URL}/api/workflows`,
+    {
+      data: {
+        version: 1,
+        name: "Invalid action",
+        steps: [{ id: "bad", action: "not_registered", inputs: {} }],
+      },
+      headers: {
+        Origin: process.env.E2E_WEB_URL!,
+        "X-CSRF-Token": auth.csrf_token,
+      },
+    },
+  );
+  expect(invalidWorkflow.status()).toBe(422);
+  const runtimeFailureWorkflow = await page.request.post(
+    `${process.env.E2E_API_URL}/api/workflows`,
+    {
+      data: {
+        version: 1,
+        name: "Safe runtime failure",
+        steps: [
+          { id: "number", action: "set_value", inputs: { value: 42 } },
+          {
+            id: "uppercase",
+            action: "uppercase",
+            inputs: { value: { $ref: "number" } },
+          },
+        ],
+      },
+      headers: {
+        Origin: process.env.E2E_WEB_URL!,
+        "X-CSRF-Token": auth.csrf_token,
+      },
+    },
+  );
+  expect(runtimeFailureWorkflow.status()).toBe(201);
+  const runtimeFailure = (await runtimeFailureWorkflow.json()) as {
+    id: number;
+  };
+  await page.goto("/workflows");
+  await page
+    .getByRole("row")
+    .filter({ hasText: "Safe runtime failure" })
+    .getByRole("button", { name: "Run" })
+    .click();
+  await expect(page.locator(".run-state").first()).toHaveText("failed");
+  await expect(page.locator(".run-detail")).toContainText("invalid_input");
+  await expect(page.locator(".run-detail")).not.toContainText("Traceback");
+  expect(runtimeFailure.id).toBeGreaterThan(0);
+  await expect(page.getByRole("link", { name: "Audit history" })).toBeVisible();
+  await page.goto("/audit");
+  await expect(
+    page.getByRole("heading", { name: "Audit history" }),
+  ).toBeVisible();
+  await expect(page.locator(".data-table")).toContainText("workflow");
+
+  await createAccount(
+    page,
+    "phase6operator",
+    "operator",
+    "phase6operator@example.test",
+  );
+  await createAccount(
+    page,
+    "phase6approver",
+    "approver",
+    "phase6approver@example.test",
+  );
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6operator", "Browser-test-password-2026!");
+  await expect(page.getByRole("link", { name: "Audit history" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("link", { name: "Accounts" })).toHaveCount(0);
+  await page.goto("/accounts");
+  await expect(page.locator(".permission-message")).toContainText(
+    "ACCESS RESTRICTED",
+  );
+  const crossResource = await page.request.get(
+    `${process.env.E2E_API_URL}/api/workflows/1`,
+  );
+  expect([403, 404]).toContain(crossResource.status());
+  const deniedAudit = await page.request.get(
+    `${process.env.E2E_API_URL}/api/audit?limit=1`,
+  );
+  expect(deniedAudit.status()).toBe(403);
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6admin");
+
+  // append is configured as approval-required in the isolated E2E server; the worker blocks until a decision.
+  await page.goto("/workflows/new");
+  await page.getByLabel("Workflow name").fill("Approval acceptance");
+  await page.getByRole("button", { name: "Append text" }).click();
+  await page.locator("#step-0-value").fill("request");
+  await page.locator("#step-0-suffix").fill("-approved");
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  const approvalRow = page
+    .getByRole("row")
+    .filter({ hasText: "Approval acceptance" });
+  await approvalRow.getByRole("button", { name: "Run" }).click();
+  await expect(page.locator(".run-state").first()).toHaveText(
+    "awaiting approval",
+  );
+  const pendingApproval = page.locator(".nav-count");
+  await expect(pendingApproval).toHaveText("1");
+  const approvalResponse = await page.request.get(
+    `${process.env.E2E_API_URL}/api/approvals?limit=100`,
+  );
+  const approvalItems = (await approvalResponse.json()) as {
+    id: number;
+    run_id: number;
+  }[];
+  const approval =
+    approvalItems.find(
+      (item) => item.run_id === Number(page.url().match(/runs\/(\d+)/)?.[1]),
+    ) ?? approvalItems[0];
+  expect(approval).toBeTruthy();
+  const adminAuth = (await (
+    await page.request.get(`${process.env.E2E_API_URL}/api/auth/me`)
+  ).json()) as { csrf_token: string };
+  const deniedDecision = await page.request.post(
+    `${process.env.E2E_API_URL}/api/approvals/${approval.id}/decision`,
+    {
+      data: { decision: "approved" },
+      headers: {
+        Origin: process.env.E2E_WEB_URL!,
+        "X-CSRF-Token": adminAuth.csrf_token,
+      },
+    },
+  );
+  expect(deniedDecision.status()).toBe(403);
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6approver", "Browser-test-password-2026!");
+  await page.goto("/approvals");
+  await expect(page.getByRole("heading", { name: "Approvals" })).toBeVisible();
+  await expect(page.locator(".approval-card").first()).toContainText(
+    "Append text",
+  );
+  await page
+    .getByLabel("Decision reason optional")
+    .fill("Reviewed the configured text input.");
+  await page.getByRole("button", { name: "Approve" }).click();
+  await expect(page.locator(".approval-card").first()).toContainText(
+    "approved",
+  );
+  await expect(
+    page
+      .locator(".approval-card")
+      .first()
+      .getByRole("button", { name: "Approve" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6admin");
+  await page.goto(`/runs/${approval.run_id}`);
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".io-grid")).toContainText("request-approved");
+
+  // Rejection path persists a failed terminal run and decision reason.
+  await page.goto("/workflows");
+  await page
+    .getByRole("row")
+    .filter({ hasText: "Approval acceptance" })
+    .getByRole("button", { name: "Run" })
+    .click();
+  await expect(page.locator(".run-state").first()).toHaveText(
+    "awaiting approval",
+  );
+  const secondRunId = Number(page.url().match(/runs\/(\d+)/)?.[1]);
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6approver", "Browser-test-password-2026!");
+  await page.goto("/approvals");
+  await page
+    .getByLabel("Decision reason optional")
+    .fill("Rejected for the negative test path.");
+  await page.getByRole("button", { name: "Reject" }).click();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6admin");
+  await page.goto(`/runs/${secondRunId}`);
+  await expect(page.locator(".run-state").first()).toHaveText("failed");
+  await expect(page.locator(".run-detail")).toContainText("approval_rejected");
+
+  // Layout checks at the requested desktop sizes and mobile width.
+  await page.goto("/dashboard");
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await expect(
+    page.getByRole("heading", { name: "Welcome, phase6admin" }),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/workflows/new");
+  for (const width of [390]) {
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    expect(overflow, `viewport ${width} should not scroll horizontally`).toBe(
+      false,
+    );
+  }
+  await page.screenshot({
+    path: "/tmp/agentflow-ux-390x844.png",
+    fullPage: false,
+  });
+  const dashboardLink = page.getByRole("link", { name: "Dashboard" });
+  await dashboardLink.focus();
+  await expect(dashboardLink).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(
+    page.getByRole("heading", { name: "Welcome, phase6admin" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+});

@@ -182,7 +182,7 @@
 
 ## Phase 5 — Security, Approvals, Auditability, and Observability
 
-**Status: COMPLETE LOCALLY — Phase 5 acceptance criteria, automated security/regression checks, migrations, and the focused browser journey passed on 2026-10-20.** Git delivery is deferred to the owner. No Phase 6 work was started.
+**Status: COMPLETE LOCALLY — Phase 5 acceptance criteria, automated security/regression checks, migrations, and the focused browser journey passed on 2026-10-20.** Git delivery is deferred to the owner. At that audit checkpoint Phase 6 had not started.
 
 - **Design and implementation:** Built-in username/email and password accounts use Argon2id hashes, opaque server-validated sessions, no public registration, and one-time interactive administrator bootstrap. Roles are admin, operator, and approver. The worker enforces configured approvals bound to run, step, action, workflow version, and resolved-input hash. Audit records, redaction, request bounds, login throttling, quotas, CSRF and Origin checks are documented in docs/security.md. The system makes no exactly-once external-side-effect claim.
 - **Connectivity diagnosis and fixes:** Active runtime defaults now consistently use dashboard port 3000 and API port 8001. The prior frontend fallback/example mismatch to 8000 is fixed; a targeted scan found no active source/config/runtime references to port 8000. The regular sandbox rejected socket binds with EPERM. In the authorized shared-process run, Chrome could reach both the existing dashboard and a disposable API/worker; the browser health request to localhost:8001 returned 200. CORS and CSRF were not the cause. Browser evidence exposed two UI defects, both fixed: a normal unauthenticated 401 incorrectly marked the API unavailable, and bodyless logout sent an empty application/json request that request middleware rejected as malformed JSON.
@@ -193,3 +193,42 @@
 - **Security limitations:** Workflow execution values remain in the database for deterministic history; do not put credentials in workflow payloads and protect DB files/backups at the OS level. Database administrators can alter audit rows; no cryptographic immutability is claimed. HTTPS and SESSION_COOKIE_SECURE=true are required in deployed environments. These limitations are documented, not unresolved critical/high findings.
 - **Git and data handling:** Branch main at 2d8de97cab7a930869bda154c116193a68ca7e0b, tracking origin/main. Phase 5 changes remain uncommitted. Per the owner's instruction, no attempt was made to change Git metadata, commit, or push. The read-only .git mount remains for the owner to handle. No user database migration was performed.
 - **Final hygiene:** git diff --check passed. A Next.js-generated change to apps/web/next-env.d.ts was restored because it only switched generated route type paths. The working database and its backup were not altered.
+
+## Phase 6 — UI, End-to-End Workflows, and Product Readiness
+
+**Status: COMPLETE LOCALLY — browser acceptance, backend regressions, frontend checks, production build, and fresh migration checks passed on 2026-10-20.** This work adds no AI or LLM integration. No API or database contract changes were needed. Git delivery is left to the owner; no commit or push was performed.
+
+### Implementation
+
+- Replaced JSON-first workflow creation with a visual step builder: registered actions, action-specific inputs and validation, ordering/removal, step-output references, a live workflow preview, and an advanced read-only JSON view. Saving and editing use the existing versioned API; server validation remains authoritative.
+- Added focused, role-aware Dashboard, Workflows, Runs, Approvals, Audit history, and Accounts routes, with full-width desktop layout, responsive mobile navigation, active-route indication, loading/empty/offline/retry/permission/error states, and keyboard focus treatment.
+- Added readable workflow detail and persisted run/step/attempt detail, version pinning, input/output, safe error details, timestamps/duration, cancellation, approval status, and refresh persistence. The first-run tutorial creates or reuses a real workflow and executes it through the API and worker; dismissal persists per account.
+- Authorization and approval enforcement remain in the API and worker. This redesign adds no backend dependency, schema migration, or new product capability.
+- The disposable Playwright runner uses a fresh temporary SQLite database, migrates through `f4c2e1a91b07`, and starts isolated API/frontend processes and a worker for execution. It does not use the user's database.
+
+### Browser acceptance evidence
+
+- **Passed — access and sessions:** Browser sign-in was required before workflow controls; an unauthenticated workflows API request returned 401. Login, logout, sign-in after logout, API outage/retry recovery, and the API connectivity indicator were exercised.
+- **Passed — visual authoring and validation:** Created a two-step workflow with a registered action, step-output reference, preview, and inputs; client validation rejected a missing name; editing preserved the reference and created a new definition version. The backend rejected an unregistered action. A runtime type error displayed a safe error without traceback.
+- **Passed — execution and persistence:** A run appeared queued and was cancelled before worker claim. With the worker started, a tutorial workflow executed to `succeeded`, both step outputs and attempt history were visible, and its result persisted after dashboard refresh. A separate visual workflow succeeded and a deterministic failure displayed safely.
+- **Passed — roles, approvals, and audit:** Operator access to audit and approval decision APIs was denied; cross-resource restrictions were exercised. An approval-pending run stayed blocked until an authorized approver decided; an approved run succeeded and a rejected request ended in safe failure. Admin audit history displayed persisted events. Approval enforcement was exercised through API responses and worker-run state, not only UI visibility.
+- **Passed — viewports and keyboard:** Playwright captured viewport-sized Chrome screenshots at 1440×900, 1920×1080, and 390×844 in `/tmp/agentflow-ux-1440x900.png`, `/tmp/agentflow-ux-1920x1080.png`, and `/tmp/agentflow-ux-390x844.png`. Browser assertions found no horizontal overflow on mobile and verified keyboard navigation activation.
+- **Not repeated in this redesign run:** Worker interruption/lease recovery was not rerun in-browser; existing Phase 4 recovery tests and prior Phase 4 verification remain the evidence. Approval race/replay behavior is covered by backend tests; the browser test observed authorized and unauthorized decisions, not a concurrent race.
+- **Browser method:** One Playwright Chromium journey passed in 1.5 minutes on 2026-10-20. The runner started API, frontend, and worker as applicable against a disposable migrated database. No application process used the real `agentflow.db`.
+
+### Verification
+
+- **Passed:** `npm run test:e2e` — 1 browser journey passed in 1.5 minutes. It covered unauthenticated denial, login/logout, API outage/retry, visual create/edit and validation, queued cancellation, worker success, failure, refresh, role/resource authorization, approval decisions, audit, mobile layout, and keyboard navigation. The disposable database upgraded through `f4c2e1a91b07`.
+- **Passed:** `.venv/bin/python -m pytest -vv` — 46 passed in 56.11 seconds, including Phase 1–5 API, migration, auth/session, security, approval, queue, idempotency, retry/timeout, cancellation, and recovery regressions.
+- **Passed:** `.venv/bin/ruff check agentflow tests migrations` and `.venv/bin/ruff format --check agentflow tests migrations`.
+- **Passed:** In `apps/web`, `npm run lint`, `npm run typecheck`, and `npm run format:check`, including E2E sources.
+- **Passed:** `npm run build -- --webpack` in an isolated temporary copy — compiled, completed TypeScript checking, and prerendered `/` and `/_not-found`. The initial build hit a Next.js TypeScript CLI config-reader failure; setting `experimental.useTypeScriptCli: false` in `apps/web/next.config.ts` uses the TypeScript compiler API path and resolved it.
+- **Passed:** Fresh disposable SQLite upgrade through `f4c2e1a91b07`; `alembic check` reported no schema drift and `PRAGMA foreign_key_check` returned no violations. No migration was added for the UI work.
+- **Passed:** `git diff --check`. `README.md` and `docs/security.md` were reviewed against implementation; authorization, session/CSRF controls, approval semantics, secret redaction, and safe API errors remain backend enforced. Frontend/runtime configuration uses API port 8001 and dashboard port 3000; remaining `8000` references are not used for runtime configuration.
+
+### Data, limitations, and delivery
+
+- The real `agentflow.db` and the existing Phase 5 backup were not used or modified. Browser accounts/workflows and migration verification used disposable temporary databases.
+- The tutorial is a deterministic demonstration of registered workflow actions; it does not call an LLM. Workflow deletion is not offered because the existing API does not support it. Run lists remain bounded by the existing API page limits.
+- **Phase 6 acceptance:** primary browser workflow — passed; persisted browser state/refresh — passed; understandable safe errors, permissions, approvals, and terminal states — passed; supported setup documented — passed; required tests and production build — passed.
+- No Git writes, commit, or push were attempted. The working tree contains uncommitted Phase 6 frontend, E2E, README, and progress changes; the owner handles Git delivery. Phase 7 was not started.
