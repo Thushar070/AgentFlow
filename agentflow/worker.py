@@ -14,22 +14,27 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from agentflow.audit import record_event
+from agentflow.config import get_settings
 from agentflow.database import SessionLocal
 from agentflow.models import (
+    ApprovalRequest,
     RunStatus,
     StepAttempt,
     StepRun,
     StepStatus,
+    User,
     WorkflowJob,
     WorkflowRun,
     WorkflowVersion,
     transition_status,
 )
-from agentflow.registry import action_spec, action_timeout
+from agentflow.registry import action_requires_approval, action_spec, action_timeout
+from agentflow.security import canonical_hash
 from agentflow.workflows import validate_definition
 
 LEASE_SECONDS = 30
@@ -67,9 +72,20 @@ def claim_job(
     timestamp = now()
     available = and_(WorkflowJob.status == "queued", WorkflowJob.available_at <= timestamp)
     expired = and_(WorkflowJob.status == "running", WorkflowJob.lease_expires_at <= timestamp)
+    expired_approval = and_(
+        WorkflowJob.status == "awaiting_approval",
+        exists(
+            select(ApprovalRequest.id).where(
+                ApprovalRequest.run_id == WorkflowJob.run_id,
+                ApprovalRequest.status == "pending",
+                ApprovalRequest.expires_at <= timestamp,
+            )
+        ),
+    )
+    eligible = or_(available, expired, expired_approval)
     candidate = session.scalar(
         select(WorkflowJob)
-        .where(or_(available, expired))
+        .where(eligible)
         .order_by(WorkflowJob.available_at, WorkflowJob.id)
         .limit(1)
     )
@@ -79,7 +95,7 @@ def claim_job(
     job_id, run_id = candidate.id, candidate.run_id
     result = session.execute(
         update(WorkflowJob)
-        .where(WorkflowJob.id == job_id, or_(available, expired))
+        .where(WorkflowJob.id == job_id, eligible)
         .values(
             status="running",
             attempts=WorkflowJob.attempts + 1,
@@ -294,6 +310,17 @@ def _finish_cancelled(
     run.error_category = "cancelled"
     run.finished_at = now()
     _finish_job(session, claim, "cancelled")
+    record_event(
+        session,
+        "run.cancelled",
+        actor_kind="worker",
+        resource_type="run",
+        resource_id=run.id,
+        workflow_id=run.workflow_id,
+        run_id=run.id,
+        outcome="cancelled",
+        correlation_id=f"run:{run.id}",
+    )
 
 
 def _check_cancelled(session_factory: sessionmaker, run_id: int) -> bool:
@@ -313,6 +340,18 @@ def _recover_interrupted_attempt(
     active.error = "Worker stopped before persisting this attempt's result."
     active.error_category = "worker_interrupted"
     active.finished_at = now()
+    record_event(
+        session,
+        "worker.attempt_interrupted",
+        actor_kind="worker",
+        resource_type="step",
+        resource_id=step.id,
+        workflow_id=run.workflow_id,
+        run_id=run.id,
+        outcome="interrupted",
+        correlation_id=f"run:{run.id}",
+        details={"step_id": step.step_id, "attempt_number": active.attempt_number},
+    )
     if not spec.idempotent_replay:
         active.error = "Action outcome is uncertain and requires reconciliation."
         active.error_category = "reconciliation_required"
@@ -341,6 +380,127 @@ def _recover_interrupted_attempt(
     run.status = RunStatus.RETRYING
     delay = min(spec.backoff_base_seconds * (2 ** (active.attempt_number - 1)), 30.0)
     _release_for_retry(session, claim, run, delay)
+    return True
+
+
+def _wait_for_approval_if_required(
+    session: Session, claim: ClaimedJob, run: WorkflowRun, step: StepRun
+) -> bool:
+    if not action_requires_approval(step.action):
+        return False
+    now_value = now()
+    digest = canonical_hash(step.inputs)
+    requests = session.scalars(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.run_id == run.id, ApprovalRequest.step_run_id == step.id)
+        .order_by(ApprovalRequest.id.desc())
+    ).all()
+    current = requests[0] if requests else None
+    same_binding = bool(
+        current
+        and current.workflow_version_id == run.workflow_version_id
+        and current.action == step.action
+        and current.inputs_hash == digest
+    )
+    if current and same_binding and current.status == "rejected":
+        step.status = StepStatus.FAILED
+        step.error = "A required approval was rejected."
+        step.error_category = "approval_rejected"
+        step.finished_at = now_value
+        run.status = RunStatus.FAILED
+        run.error = f"Step '{step.step_id}' was rejected by an approver."
+        run.error_category = "approval_rejected"
+        run.finished_at = now_value
+        job = session.get(WorkflowJob, claim.job_id)
+        if job:
+            job.status = "failed"
+            job.locked_by = None
+            job.lease_expires_at = None
+        record_event(
+            session,
+            "run.approval_rejected",
+            actor_kind="worker",
+            resource_type="run",
+            resource_id=run.id,
+            workflow_id=run.workflow_id,
+            run_id=run.id,
+            outcome="failed",
+            correlation_id=f"run:{run.id}",
+        )
+        return True
+
+    if current and same_binding and current.status == "approved":
+        approver = session.get(User, current.decided_by_id) if current.decided_by_id else None
+        if (
+            current.expires_at > now_value
+            and current.requester_id != current.decided_by_id
+            and approver is not None
+            and approver.is_active
+            and approver.role in {"admin", "approver"}
+        ):
+            return False
+        current.status = "stale"
+        current.decided_at = now_value
+
+    if current and same_binding and current.status == "pending" and current.expires_at > now_value:
+        run.status = RunStatus.AWAITING_APPROVAL
+        job = session.get(WorkflowJob, claim.job_id)
+        if job:
+            job.status = "awaiting_approval"
+            job.locked_by = None
+            job.lease_expires_at = None
+            job.updated_at = now_value
+        return True
+
+    if current and current.status in {"pending", "approved"}:
+        current.status = "stale"
+        current.decided_at = now_value
+        record_event(
+            session,
+            "approval.stale",
+            actor_kind="worker",
+            resource_type="approval",
+            resource_id=current.id,
+            run_id=run.id,
+            outcome="stale",
+            correlation_id=f"run:{run.id}",
+        )
+
+    request_row = ApprovalRequest(
+        run_id=run.id,
+        step_run_id=step.id,
+        workflow_version_id=run.workflow_version_id,
+        action=step.action,
+        inputs_hash=digest,
+        requester_id=run.created_by_id,
+        status="pending",
+        created_at=now_value,
+        expires_at=now_value + timedelta(hours=get_settings().approval_ttl_hours),
+    )
+    session.add(request_row)
+    run.status = RunStatus.AWAITING_APPROVAL
+    run.error = None
+    run.error_category = None
+    job = session.get(WorkflowJob, claim.job_id)
+    if job:
+        job.status = "awaiting_approval"
+        job.locked_by = None
+        job.lease_expires_at = None
+        job.updated_at = now_value
+    requester = session.get(User, run.created_by_id) if run.created_by_id else None
+    record_event(
+        session,
+        "approval.requested",
+        actor=requester,
+        actor_kind="system",
+        resource_type="approval",
+        resource_id=run.id,
+        workflow_id=run.workflow_id,
+        run_id=run.id,
+        outcome="pending",
+        correlation_id=f"run:{run.id}",
+        details={"step_id": step.step_id, "action": step.action},
+    )
     return True
 
 
@@ -375,6 +535,17 @@ def process_claimed_job(
             run.status = transition_status(run.status, RunStatus.RUNNING, entity="run")
         if run.started_at is None:
             run.started_at = now()
+            record_event(
+                session,
+                "run.started",
+                actor_kind="worker",
+                resource_type="run",
+                resource_id=run.id,
+                workflow_id=run.workflow_id,
+                run_id=run.id,
+                outcome="running",
+                correlation_id=f"run:{run.id}",
+            )
         session.commit()
 
         outputs: dict[str, dict] = {}
@@ -424,6 +595,9 @@ def process_claimed_job(
                 inputs = step.inputs
 
             spec = action_spec(step.action)
+            if _wait_for_approval_if_required(session, claim, run, step):
+                session.commit()
+                return
             previous_attempt = max((item.attempt_number for item in step.attempts), default=0)
             attempt = StepAttempt(
                 step_run_id=step.id,
@@ -437,6 +611,18 @@ def process_claimed_job(
             step.started_at = step.started_at or now()
             step.finished_at = None
             session.add(attempt)
+            record_event(
+                session,
+                "step.started",
+                actor_kind="worker",
+                resource_type="step",
+                resource_id=step.id,
+                workflow_id=run.workflow_id,
+                run_id=run.id,
+                outcome="running",
+                correlation_id=f"run:{run.id}",
+                details={"step_id": step.step_id, "action": step.action},
+            )
             session.commit()
 
             outcome = _invoke_action(
@@ -475,6 +661,18 @@ def process_claimed_job(
                 step.status = transition_status(step.status, StepStatus.SUCCEEDED, entity="step")
                 step.finished_at = now()
                 outputs[step.step_id] = outcome.output or {}
+                record_event(
+                    session,
+                    "step.succeeded",
+                    actor_kind="worker",
+                    resource_type="step",
+                    resource_id=step.id,
+                    workflow_id=run.workflow_id,
+                    run_id=run.id,
+                    outcome="succeeded",
+                    correlation_id=f"run:{run.id}",
+                    details={"step_id": step.step_id, "action": step.action},
+                )
                 session.commit()
                 if shutdown.is_set():
                     run.status = RunStatus.RETRYING
@@ -488,6 +686,18 @@ def process_claimed_job(
             attempt.error_category = outcome.category
             attempt.finished_at = now()
             category = outcome.category or "execution_failed"
+            record_event(
+                session,
+                "step.attempt_failed",
+                actor_kind="worker",
+                resource_type="step",
+                resource_id=step.id,
+                workflow_id=run.workflow_id,
+                run_id=run.id,
+                outcome=category,
+                correlation_id=f"run:{run.id}",
+                details={"step_id": step.step_id, "action": step.action},
+            )
             retryable = category in spec.retryable_categories
             if retryable and spec.idempotent_replay and attempt.attempt_number < spec.max_attempts:
                 step.status = transition_status(step.status, StepStatus.RETRYING, entity="step")
@@ -498,6 +708,18 @@ def process_claimed_job(
                 run.error_category = category
                 delay = min(spec.backoff_base_seconds * (2 ** (attempt.attempt_number - 1)), 30.0)
                 _release_for_retry(session, claim, run, delay)
+                record_event(
+                    session,
+                    "run.retry_scheduled",
+                    actor_kind="worker",
+                    resource_type="run",
+                    resource_id=run.id,
+                    workflow_id=run.workflow_id,
+                    run_id=run.id,
+                    outcome="retrying",
+                    correlation_id=f"run:{run.id}",
+                    details={"step_id": step.step_id, "category": category},
+                )
                 session.commit()
                 return
             if retryable and attempt.attempt_number >= spec.max_attempts:
@@ -517,6 +739,17 @@ def process_claimed_job(
             run.error_category = category
             run.finished_at = now()
             _finish_job(session, claim, "failed")
+            record_event(
+                session,
+                "run.failed",
+                actor_kind="worker",
+                resource_type="run",
+                resource_id=run.id,
+                workflow_id=run.workflow_id,
+                run_id=run.id,
+                outcome=category,
+                correlation_id=f"run:{run.id}",
+            )
             session.commit()
             return
 
@@ -524,6 +757,17 @@ def process_claimed_job(
         run.output = outputs.get(definition.steps[-1].id)
         run.finished_at = now()
         _finish_job(session, claim, "succeeded")
+        record_event(
+            session,
+            "run.succeeded",
+            actor_kind="worker",
+            resource_type="run",
+            resource_id=run.id,
+            workflow_id=run.workflow_id,
+            run_id=run.id,
+            outcome="succeeded",
+            correlation_id=f"run:{run.id}",
+        )
         session.commit()
 
 

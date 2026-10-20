@@ -49,6 +49,7 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     RETRYING = "retrying"
     CANCEL_REQUESTED = "cancel_requested"
+    AWAITING_APPROVAL = "awaiting_approval"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -67,16 +68,67 @@ class InvalidTransition(ValueError):
     """Raised when a synchronous workflow state transition is not allowed."""
 
 
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("username_normalized", name="uq_users_username_normalized"),
+        UniqueConstraint("email_normalized", name="uq_users_email_normalized"),
+        CheckConstraint("role IN ('admin', 'operator', 'approver')", name="ck_user_role"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), nullable=False)
+    username_normalized: Mapped[str] = mapped_column(String(80), nullable=False)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    email_normalized: Mapped[str] = mapped_column(String(254), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="operator")
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    __table_args__ = (Index("ix_user_sessions_user_expiry", "user_id", "expires_at"),)
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
+
+
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+    __table_args__ = (Index("ix_login_attempts_key_time", "key_hash", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    succeeded: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
+
+
 def transition_status(current: str, target: str, *, entity: str) -> str:
     allowed = {
         "run": {
             "queued": {"running", "cancelled"},
-            "running": {"retrying", "cancel_requested", "succeeded", "failed", "cancelled"},
+            "running": {
+                "retrying",
+                "cancel_requested",
+                "awaiting_approval",
+                "succeeded",
+                "failed",
+                "cancelled",
+            },
             "retrying": {"running", "cancel_requested", "failed", "cancelled"},
             "cancel_requested": {"cancelled", "succeeded", "failed"},
+            "awaiting_approval": {"queued", "cancelled", "failed"},
         },
         "step": {
-            "queued": {"running", "cancelled"},
+            "queued": {"running", "failed", "cancelled"},
             "running": {"retrying", "succeeded", "failed", "cancelled"},
             "retrying": {"running", "failed", "cancelled"},
         },
@@ -92,6 +144,9 @@ class Workflow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(String(1000))
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     versions: Mapped[list["WorkflowVersion"]] = relationship(
@@ -146,7 +201,7 @@ class WorkflowRun(Base):
         ),
         UniqueConstraint("workflow_id", "idempotency_key", name="uq_run_idempotency_key"),
         CheckConstraint(
-            "status IN ('queued', 'running', 'retrying', 'cancel_requested', "
+            "status IN ('queued', 'running', 'retrying', 'cancel_requested', 'awaiting_approval', "
             "'succeeded', 'failed', 'cancelled')",
             name="ck_run_status",
         ),
@@ -154,7 +209,8 @@ class WorkflowRun(Base):
             "error_category IS NULL OR error_category IN "
             "('unknown_action', 'invalid_input', 'invalid_output', "
             "'permission_denied', 'execution_failed', 'action_timeout', "
-            "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required')",
+            "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
+            "'approval_rejected')",
             name="ck_run_error_category",
         ),
         Index("ix_workflow_runs_workflow_status", "workflow_id", "status"),
@@ -172,6 +228,7 @@ class WorkflowRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
     error_category: Mapped[str | None] = mapped_column(String(40))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     cancel_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     workflow: Mapped[Workflow] = relationship(back_populates="runs", foreign_keys=[workflow_id])
     workflow_version: Mapped[WorkflowVersion] = relationship(
@@ -197,7 +254,8 @@ class StepRun(Base):
             "error_category IS NULL OR error_category IN "
             "('unknown_action', 'invalid_input', 'invalid_output', "
             "'permission_denied', 'execution_failed', 'action_timeout', "
-            "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required')",
+            "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
+            "'approval_rejected')",
             name="ck_step_error_category",
         ),
     )
@@ -229,7 +287,8 @@ class WorkflowJob(Base):
     __table_args__ = (
         UniqueConstraint("run_id", name="uq_workflow_job_run"),
         CheckConstraint(
-            "status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
+            "status IN ('queued', 'running', 'awaiting_approval', 'succeeded', 'failed', "
+            "'cancelled')",
             name="ck_workflow_job_status",
         ),
         CheckConstraint("attempts >= 0", name="ck_workflow_job_attempts"),
@@ -267,7 +326,7 @@ class StepAttempt(Base):
             "error_category IS NULL OR error_category IN "
             "('unknown_action', 'invalid_input', 'invalid_output', 'permission_denied', "
             "'execution_failed', 'action_timeout', 'retries_exhausted', 'worker_interrupted', "
-            "'cancelled', 'reconciliation_required')",
+            "'cancelled', 'reconciliation_required', 'approval_rejected')",
             name="ck_step_attempt_error_category",
         ),
         Index("ix_step_attempts_step", "step_run_id", "attempt_number"),
@@ -285,3 +344,55 @@ class StepAttempt(Base):
     started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     step_run: Mapped[StepRun] = relationship(back_populates="attempts")
+
+
+class ApprovalRequest(Base):
+    __tablename__ = "approval_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'stale')", name="ck_approval_status"
+        ),
+        Index("ix_approval_requests_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_run_id: Mapped[int] = mapped_column(
+        ForeignKey("step_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    workflow_version_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_versions.id"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
+    inputs_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requester_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    decided_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reason: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_created_id", "created_at", "id"),
+        Index("ix_audit_events_event_type_id", "event_type", "id"),
+        Index("ix_audit_events_run_id", "run_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    actor_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(80))
+    workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflows.id", ondelete="SET NULL"))
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_runs.id", ondelete="SET NULL"))
+    outcome: Mapped[str] = mapped_column(String(30), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)

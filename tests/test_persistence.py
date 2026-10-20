@@ -26,7 +26,7 @@ from agentflow.models import (
 from agentflow.worker import ActionOutcome, claim_job, process_claimed_job
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = "6ab9d731c2f0"
+REVISION = "f4c2e1a91b07"
 
 
 def run_migration(database_url: str, revision: str = "head"):

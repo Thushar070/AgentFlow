@@ -114,6 +114,16 @@ def action_spec(action: str) -> ActionSpec:
         ) from exc
 
 
+def action_requires_approval(action: str) -> bool:
+    configured = set(get_settings().approval_required_actions)
+    unknown = configured - set(ACTION_REGISTRY)
+    if unknown:
+        raise ValueError(
+            f"APPROVAL_REQUIRED_ACTIONS contains unregistered actions: {', '.join(sorted(unknown))}"
+        )
+    return action in configured
+
+
 def validate_step(step, prior_ids: set[str]) -> None:
     spec = action_spec(step.action)
     raw = dict(step.inputs)
@@ -177,6 +187,7 @@ def action_catalog() -> list[dict[str, Any]]:
             "input_schema": spec.input_schema.model_json_schema(),
             "output_schema": spec.output_schema.model_json_schema(),
             "required_permissions": list(spec.required_permissions),
+            "approval_required": action_requires_approval(key),
             "timeout_policy": spec.timeout_policy.value,
             "timeout_seconds": action_timeout(key),
             "max_attempts": spec.max_attempts,

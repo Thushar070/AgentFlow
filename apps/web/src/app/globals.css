@@ -278,6 +278,27 @@ body {
   color: #657069;
   margin-bottom: 8px;
 }
+.builder input,
+.builder select {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  margin-bottom: 14px;
+  padding: 9px 11px;
+  border: 1px solid #dfe5df;
+  border-radius: 8px;
+  background: #fff;
+  color: #314238;
+  font:
+    12px "DM Mono",
+    monospace;
+}
+.builder input:focus,
+.builder select:focus {
+  outline: none;
+  border-color: #7eaf93;
+  box-shadow: 0 0 0 3px #e5f1e9;
+}
 .builder textarea {
   display: block;
   width: 100%;
@@ -370,7 +391,9 @@ body {
 }
 .run-state.queued,
 .run-state.retrying,
-.run-state.cancel_requested {
+.run-state.cancel_requested,
+.run-state.awaiting_approval,
+.run-state.pending {
   background: #fff4df;
   color: #8c6720;
 }
@@ -386,6 +409,26 @@ body {
 .step-list {
   margin-top: 10px;
   border-top: 1px solid #edf0ed;
+}
+.approval-inputs {
+  margin: 10px 0 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #f6f8f5;
+  color: #47564b;
+  font:
+    10px/1.5 "DM Mono",
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.audit-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: #657069;
 }
 .step-row {
   min-height: 37px;

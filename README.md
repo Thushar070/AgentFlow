@@ -27,7 +27,19 @@ python -m agentflow
 cd apps/web && npm run dev
 ```
 
-Open <http://localhost:3000>. The API health endpoint is <http://localhost:8000/health>; interactive API docs are at <http://localhost:8000/docs>. Run `alembic upgrade head` (or `make migrate`) before starting the API. Application startup checks the current schema revision and fails with a migration command if it is behind; it does not create or reset database tables. Alembic and the API read the same `DATABASE_URL` setting.
+Open <http://localhost:3000>. The API health endpoint is <http://localhost:8001/health>; interactive API docs are at <http://localhost:8001/docs>. Run `alembic upgrade head` (or `make migrate`) before starting the API. Application startup checks the current schema revision and fails with a migration command if it is behind; it does not create or reset database tables. Alembic and the API read the same `DATABASE_URL` setting; the frontend's `NEXT_PUBLIC_API_URL` must point to the same API port.
+
+After migration, create the first administrator from a local terminal:
+
+```sh
+python -m agentflow.admin bootstrap-admin
+```
+
+The command prompts for username, email, and a password twice without echoing it. It accepts no password arguments, refuses to proceed when an active administrator exists, and does not create a default credential. Sign in through the dashboard, then create operator or approver accounts from the administrator panel. There is no public registration route. For recovery, a local OS operator may run `python -m agentflow.admin reset-admin-password ADMIN_USERNAME`; this prompts interactively and revokes that administrator's sessions. Protect the database file and restrict local shell access.
+
+Session cookies are opaque, stored only as hashes, `HttpOnly`, and `SameSite=Lax`. `SESSION_COOKIE_SECURE` defaults to `true`; set it to `false` only for local HTTP development (the example `.env` does this). Enable it behind HTTPS in every deployed environment. Browser state-changing requests require an allowed `Origin` and a session-bound CSRF token. Set `CORS_ORIGINS` to the exact dashboard origins. Sessions expire after `SESSION_TTL_HOURS` (12 by default); sign-out and password changes revoke sessions.
+
+Roles are `admin`, `operator`, and `approver`. Administrators manage accounts and access all records. Operators create and manage their own workflows and runs. Approvers can see pending requests and their action/input context, but cannot edit workflows or run/cancel jobs. A requester cannot approve their own run. Existing Phase 1–4 workflows remain accessible to administrators; their new owner is left null so they are not silently assigned to a user.
 
 ## Workflow format
 
@@ -58,11 +70,13 @@ make worker
 
 If no worker is running, runs remain queued. If a worker stops after claiming work, another worker can reclaim the job after its lease expires and resume from completed steps. Each attempt and retry time is persisted. Repeated delivery can rerun an action whose result was not saved; current built-in actions are pure local operations, so this does not repeat external side effects. External side-effect actions are not supported until they provide an idempotency/reconciliation contract. Do not interpret this system as providing exactly-once external execution. If the database is unavailable, the API does not accept the run; an accepted queued run is never reported successful until the worker persists completion. Configure the API and worker with the same `DATABASE_URL` and `ACTION_TIMEOUTS` values.
 
-This version does not authenticate users or isolate tenants; do not expose it as a shared production service.
+Configure approval-required registered actions with `APPROVAL_REQUIRED_ACTIONS`, for example `APPROVAL_REQUIRED_ACTIONS=["append"]`. The default is empty because the built-in actions are pure local transformations. The worker checks a persisted approval bound to the run, step, action, workflow version, and resolved input hash before it starts an attempt. Approval requests expire after `APPROVAL_TTL_HOURS` (24 by default); approvals are single-decision and self-approval is denied. `GET /api/approvals` exposes only the caller's requests, requests pending for approvers, or all requests for admins. `GET /api/audit` is administrator-only and supports bounded filters and pagination.
+
+`MAX_REQUEST_BODY_BYTES` defaults to 1 MiB; JSON nesting is limited to 32 levels; workflow definitions remain limited to 512 KiB and 50 steps; run creation is limited to `MAX_RUNS_PER_HOUR` (100 by default); audit and approval pages are capped at 100 rows. Login attempts are throttled by normalized identity and client address. API responses, audit details, and diagnostic boundaries recursively redact common credential fields and recognizable token patterns. Execution inputs and outputs are retained for deterministic workflow behavior and may contain user-provided values; do not place passwords, API keys, or other credentials in workflow payloads. Audit rows are append-only through the application, not cryptographically immutable; database administrators can modify them. See [docs/security.md](docs/security.md) for the threat model and deployment limits.
 
 ### Database migration
 
-Alembic manages schema changes. For a fresh SQLite database run `alembic upgrade head`. The Phase 1 schema is upgraded in place while preserving its workflows and execution history. Back up the database file before upgrading an existing installation, for example `cp agentflow.db agentflow.db.bak`; migrations never delete or reset the database. The current revision is `6ab9d731c2f0`, following `d9156bc2a041`, `70b823ceda15`, and `0432ed0b773b`. Downgrade is intentionally disabled because it would discard queue and attempt history.
+Alembic manages schema changes. For a fresh SQLite database run `alembic upgrade head`. The Phase 1 schema is upgraded in place while preserving its workflows and execution history. Back up the database file before upgrading an existing installation, for example `cp agentflow.db agentflow.db.bak`; migrations never delete or reset the database. The current revision is `f4c2e1a91b07`, following `6ab9d731c2f0`, `d9156bc2a041`, `70b823ceda15`, and `0432ed0b773b`. Downgrade is intentionally disabled because it would discard queue, approval, session, and audit history. Legacy workflow owners remain null and are visible to administrators only.
 
 ## Checks
 
@@ -75,4 +89,4 @@ cd apps/web && npm run lint && npm run typecheck && npm run format:check && npm 
 
 ## Architecture and next steps
 
-`agentflow/workflows.py` owns the definition contract, `registry.py` the fixed action catalog, `execution.py` durable submission, `worker.py` lease/retry/recovery coordination, `models.py` persistent records, and `main.py` the HTTP boundary. `migrations/versions/` contains the Alembic schema history. The Next.js dashboard talks to the API only. SQLAlchemy isolates persistence behind `DATABASE_URL`; the database-backed queue keeps local development service-free. Authentication/authorization, approval workflows, and AI workflow proposals remain future work.
+`workflows.py` owns the definition contract, `registry.py` the fixed action catalog, `execution.py` durable submission, `worker.py` lease/retry/recovery coordination, `auth.py` opaque server-validated sessions, `authorization.py` resource ownership checks, `models.py` persistent records, and `main.py` the HTTP boundary. The Next.js dashboard talks to the API only. SQLAlchemy isolates persistence behind `DATABASE_URL`; the database-backed queue keeps local development service-free. AI workflow proposals remain future work.
