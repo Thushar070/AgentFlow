@@ -4,7 +4,7 @@ import argparse
 import getpass
 import sys
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from agentflow.auth import hash_password, normalize_login
 from agentflow.database import SessionLocal
@@ -12,7 +12,9 @@ from agentflow.models import AuditEvent, User, UserSession, utcnow
 
 
 def _prompt_password() -> str:
-    password = getpass.getpass("Password (minimum 12 characters): ")
+    password = getpass.getpass(
+        "Password (exactly 8 characters, including a number and symbol): "
+    )
     confirm = getpass.getpass("Confirm password: ")
     if password != confirm:
         raise ValueError("Passwords do not match.")
@@ -20,25 +22,24 @@ def _prompt_password() -> str:
 
 
 def bootstrap_admin() -> int:
-    with SessionLocal() as check_session:
-        initialized = check_session.scalar(
-            select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
-        )
-    if initialized:
-        print("Administrator bootstrap is already closed.", file=sys.stderr)
-        return 1
-    username = input("Administrator username: ").strip()
-    email = input("Administrator email: ").strip()
-    password = _prompt_password()
-    password_hash = hash_password(password)
     with SessionLocal() as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        admins = session.scalar(
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        elif dialect == "postgresql":
+            session.execute(text("SELECT pg_advisory_xact_lock(731945120014)"))
+        else:
+            raise RuntimeError(f"Administrator bootstrap is unsupported for {dialect}.")
+        initialized = session.scalar(
             select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
         )
-        if admins:
+        if initialized:
             print("Administrator bootstrap is already closed.", file=sys.stderr)
             return 1
+        username = input("Administrator username: ").strip()
+        email = input("Administrator email: ").strip()
+        password = _prompt_password()
+        password_hash = hash_password(password)
         user = User(
             username=username,
             username_normalized=normalize_login(username),
@@ -69,9 +70,12 @@ def reset_admin_password(username: str) -> int:
     normalized = normalize_login(username)
     password_hash = hash_password(_prompt_password())
     with SessionLocal() as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        # PostgreSQL starts a transaction with the SELECT and locks the target
+        # row so concurrent password resets cannot overwrite one another.
         user = session.scalar(
-            select(User).where(User.username_normalized == normalized, User.role == "admin")
+            select(User)
+            .where(User.username_normalized == normalized, User.role == "admin")
+            .with_for_update()
         )
         if user is None:
             print("Administrator not found.", file=sys.stderr)

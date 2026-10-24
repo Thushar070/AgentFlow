@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 
-const password = process.env.E2E_PASSWORD ?? "E2E-only.AgentFlow!2026";
+const password = process.env.E2E_PASSWORD ?? "E2e1!pwX";
 let worker: ChildProcess | undefined;
 
 test.afterAll(() => {
@@ -22,7 +22,7 @@ async function signIn(page: Page, username: string, pass = password) {
 async function createTextWorkflow(page: Page, name: string) {
   await page.goto("/workflows/new");
   await page.getByRole("button", { name: "Save workflow" }).click();
-  await expect(page.locator(".validation-summary")).toContainText(
+  await expect(page.locator(".validation-summary").last()).toContainText(
     "Enter a workflow name.",
   );
   await page.getByLabel("Workflow name").fill(name);
@@ -51,7 +51,7 @@ async function createAccount(
   await page.goto("/accounts");
   await page.getByLabel("Username", { exact: true }).fill(username);
   await page.getByLabel("Email", { exact: true }).fill(email);
-  await page.getByLabel("Initial password").fill("Browser-test-password-2026!");
+  await page.getByLabel("Initial password").fill("User1!pw");
   await page.getByLabel("Role", { exact: true }).selectOption(role);
   await page.getByRole("button", { name: "Create account" }).click();
   await expect(page.locator(".success-alert")).toContainText(
@@ -81,6 +81,7 @@ async function createAndRunExample(
 test("visual workflow journey, persisted run details, roles, approvals, audit, and responsive navigation", async ({
   page,
 }) => {
+  test.setTimeout(300_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
@@ -310,6 +311,83 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
   await expect(page.locator(".run-state").first()).toHaveText("succeeded");
   await expect(page.locator(".workflow-output")).toContainText("Kept");
 
+  await page.goto("/workflows/new");
+  await page
+    .getByLabel("What should this workflow do?")
+    .fill("Convert customer names to uppercase and append a suffix.");
+  await expect(page.getByLabel("AI model")).toHaveValue("freellmapi");
+  await expect(
+    page.getByText(/FreeLLMAPI unified key and its active fallback chain/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Generate proposal" }).click();
+  await expect(page.getByRole("status")).toContainText("Proposal ready");
+  await expect(page.locator("#workflow-name")).toHaveValue(
+    "Generated text workflow",
+  );
+  await expect(page.locator(".step-editor")).toHaveCount(3);
+  await page.locator("#workflow-name").fill("AI edited customer name");
+  await page.getByLabel("Reference source for suffix").selectOption("");
+  await page.locator("#step-2-suffix").fill("!");
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  await expect(page).toHaveURL(/\/workflows$/);
+  const generatedRow = page
+    .getByRole("row")
+    .filter({ hasText: "AI edited customer name" });
+  await expect(generatedRow).toBeVisible();
+  await generatedRow.getByRole("button", { name: "Run" }).click();
+  await page.locator("#run-input-customer_name").fill("Ada Lovelace");
+  await page.locator("#run-input-suffix").fill("!");
+  await page.getByRole("button", { name: "Start workflow" }).click();
+  await expect(page).toHaveURL(/\/runs\/\d+$/);
+  const generatedRunId = Number(page.url().match(/runs\/(\d+)/)?.[1]);
+  await expect(page.locator(".run-state").first()).toHaveText(
+    "awaiting approval",
+  );
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6approver", "User1!pw");
+  await page.goto("/approvals");
+  const generatedApproval = page
+    .locator(".approval-card")
+    .filter({ hasText: `run #${generatedRunId}` })
+    .first();
+  await expect(generatedApproval).toBeVisible();
+  await generatedApproval.getByRole("button", { name: "Approve" }).click();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await signIn(page, "phase6admin");
+  await page.goto(`/runs/${generatedRunId}`);
+  await expect(page.locator(".run-state").first()).toHaveText("succeeded");
+  await expect(page.locator(".workflow-output")).toContainText("ADA LOVELACE!");
+
+  const beforeInvalidProposal = await Promise.all([
+    page.request.get(`${process.env.E2E_API_URL}/api/workflows`),
+    page.request.get(`${process.env.E2E_API_URL}/api/runs?limit=100`),
+  ]);
+  const workflowCountBefore = (
+    (await beforeInvalidProposal[0].json()) as unknown[]
+  ).length;
+  const runCountBefore = ((await beforeInvalidProposal[1].json()) as unknown[])
+    .length;
+  await page.goto("/workflows/new");
+  await page.getByLabel("What should this workflow do?").fill("invalid action");
+  await page.getByRole("button", { name: "Generate proposal" }).click();
+  await expect(page.locator(".validation-summary")).toContainText(
+    "not registered",
+  );
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  await expect(page.locator(".validation-summary").last()).toContainText(
+    "Enter a workflow name.",
+  );
+  const afterInvalidProposal = await Promise.all([
+    page.request.get(`${process.env.E2E_API_URL}/api/workflows`),
+    page.request.get(`${process.env.E2E_API_URL}/api/runs?limit=100`),
+  ]);
+  expect(((await afterInvalidProposal[0].json()) as unknown[]).length).toBe(
+    workflowCountBefore,
+  );
+  expect(((await afterInvalidProposal[1].json()) as unknown[]).length).toBe(
+    runCountBefore,
+  );
+
   const approvalExampleRun = await createAndRunExample(page, "Human approval", {
     request: JSON.stringify({ operation: "delete", resource: "sample" }),
   });
@@ -317,7 +395,7 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
     "awaiting approval",
   );
   await page.getByRole("button", { name: "Sign out" }).click();
-  await signIn(page, "phase6approver", "Browser-test-password-2026!");
+  await signIn(page, "phase6approver", "User1!pw");
   await page.goto("/approvals");
   const templateApproval = page
     .locator(".approval-card")
@@ -331,7 +409,7 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
   await expect(page.locator(".run-state").first()).toHaveText("succeeded");
 
   await page.getByRole("button", { name: "Sign out" }).click();
-  await signIn(page, "phase6operator", "Browser-test-password-2026!");
+  await signIn(page, "phase6operator", "User1!pw");
   await expect(page.getByRole("link", { name: "Audit history" })).toHaveCount(
     0,
   );
@@ -394,7 +472,7 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
   );
   expect(deniedDecision.status()).toBe(403);
   await page.getByRole("button", { name: "Sign out" }).click();
-  await signIn(page, "phase6approver", "Browser-test-password-2026!");
+  await signIn(page, "phase6approver", "User1!pw");
   await page.goto("/approvals");
   await expect(page.getByRole("heading", { name: "Approvals" })).toBeVisible();
   await expect(page.locator(".approval-card").first()).toContainText(
@@ -431,7 +509,7 @@ test("visual workflow journey, persisted run details, roles, approvals, audit, a
   );
   const secondRunId = Number(page.url().match(/runs\/(\d+)/)?.[1]);
   await page.getByRole("button", { name: "Sign out" }).click();
-  await signIn(page, "phase6approver", "Browser-test-password-2026!");
+  await signIn(page, "phase6approver", "User1!pw");
   await page.goto("/approvals");
   await page
     .getByLabel("Decision reason optional")

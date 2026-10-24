@@ -1,0 +1,170 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[left=1.3cm,right=1.3cm,top=0.2cm,bottom=0.3cm]{geometry}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=black,urlcolor=black]{hyperref}
+\usepackage{setspace}
+\usepackage{tabularx}
+\pagenumbering{gobble}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\setstretch{0.85}
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\setlist[itemize]{leftmargin=2.1em,topsep=1pt,itemsep=1.5pt,parsep=0pt}
+
+\newcommand{\sectionheading}[1]{%
+  \par\vspace{3pt}%
+  \textbf{\large #1}\\[-8pt]
+  \hrule
+  \vspace{3pt}%
+}
+
+% \projectheader{Name}{Subtitle}{GitHub URL}{Tech stack}
+\newcommand{\projectheader}[4]{%
+  \noindent\textbf{#1} --- \textbf{#2}\hfill\href{#3}{GitHub}\\[1pt]
+  \textbf{Tech Stack:} #4%
+}
+
+\begin{document}
+
+%---------------- HEADER ----------------%
+
+\begin{center}
+{\LARGE \textbf{THUSHAR T L}}
+\end{center}
+
+\vspace{-0.8em}
+
+\begin{center}
+\href{mailto:thushar.tl.dev@gmail.com}{thushar.tl.dev@gmail.com}
+\quad\textbf{\textbar}\quad
+\href{tel:+917904103144}{+91 7904103144}
+\quad\textbf{\textbar}\quad
+\href{https://leetcode.com/u/ThusharTL/}{leetcode.com/u/ThusharTL}
+\quad\textbf{\textbar}\quad
+\href{https://www.linkedin.com/in/thushar-t-l-345845377/}{linkedin.com/in/thushar-t-l}
+\quad\textbf{\textbar}\quad
+\href{https://github.com/Thushar070}{github.com/Thushar070}
+\quad\textbf{\textbar}\quad
+\href{https://thushar-portfolio.vercel.app/}{Portfolio}
+\quad\textbf{\textbar}\quad
+Chennai, India
+\end{center}
+
+%---------------- EDUCATION ----------------%
+
+\sectionheading{Education}
+
+\textbf{Sri Sivasubramaniya Nadar College of Engineering}\hfill Chennai\\
+Bachelor of Engineering in Computer Science and Engineering\hfill 2024--2028\\
+CGPA: 7.79 / 10 (after 4 semesters)
+
+
+%---------------- EXPERIENCE ----------------%
+
+\sectionheading{Experience}
+
+\textbf{\href{https://www.blastorz.fun/}{Blastorz}}\\
+Freelance Full-Stack Developer \textbar\ Remote
+\hfill May 2026--Jun 2026
+
+\begin{itemize}
+\item Reduced inventory reconciliation from \textbf{hours to minutes} across four shop branches by implementing transactional PostgreSQL RPC functions with row-level locking.
+\item Closed a recurring cash-skimming loophole by adding \textbf{role-based authorization and audit logging}.
+\item Built an \textbf{installable, offline-first Progressive Web App} with real-time dashboards for tracking inventory, sales, and profit.
+\end{itemize}
+
+\vspace{4pt}
+
+\textbf{\href{https://www.bytesbrush.in/}{BytesBrush}}\\
+Freelance Frontend Developer \textbar\ Remote
+\hfill Mar 2026--May 2026
+
+\begin{itemize}
+\item Integrated an existing \textbf{HTML Canvas component} into the Next.js dashboard for Drona, an educational platform where instructors and students interact in a classroom-like interface.
+\item Connected the dashboard to the existing \textbf{WebSocket stream} so live patient monitoring data rendered on the canvas in real time.
+\end{itemize}
+
+%---------------- PROJECTS ----------------%
+
+\sectionheading{Projects}
+
+\projectheader
+{QueueLess}
+{Multi-Tenant Virtual Queue Platform}
+{https://github.com/Thushar070/queueless}
+{Next.js \textperiodcentered\ TypeScript \textperiodcentered\ Supabase \textperiodcentered\ Prisma \textperiodcentered\ Hermes-Relay}
+
+\begin{itemize}
+\item Built a multi-tenant virtual queue platform that lets multiple businesses manage customer queues at once through QR code-based check-ins and live queue tracking.
+\item Used \textbf{atomic, transaction-based} state machine operations to prevent race conditions during concurrent updates.
+\item Enforced strict tenant isolation with \textbf{Row-Level Security} policies so each business's data stayed fully separated.
+\item Added live position tracking through Supabase Realtime with a \textbf{5-second polling fallback} for reliability.
+\end{itemize}
+
+\vspace{4pt}
+
+\projectheader
+{TrustLance}
+{Escrow-Based Freelance Marketplace}
+{https://github.com/Thushar070/trustlance}
+{Next.js \textperiodcentered\ TypeScript \textperiodcentered\ Neon \textperiodcentered\ Prisma \textperiodcentered\ SendGrid}
+
+\begin{itemize}
+\item Built an escrow-based freelance marketplace with a \textbf{transaction-safe workflow} that keeps funds protected until a project is completed.
+\item Modeled escrow transactions as a \textbf{7-state} machine with admin dispute resolution to keep behavior consistent during disputes and refunds.
+\item Integrated signature-verified Razorpay payments (test mode) and added secure authentication and role-based permissions to block unauthorized payment actions, backed by full audit trails.
+\end{itemize}
+
+\vspace{4pt}
+
+\projectheader
+{AgentFlow}
+{AI Workflow Automation Agent}
+{https://github.com/Thushar070/AgentFlow}
+{Python \textperiodcentered\ TypeScript \textperiodcentered\ FastAPI \textperiodcentered\ Next.js \textperiodcentered\ PostgreSQL (Neon) \textperiodcentered\ FreeLLMAPI \textperiodcentered\ Ollama (Qwen) \textperiodcentered\ SQLAlchemy \textperiodcentered\ Alembic}
+
+\begin{itemize}
+\item Built AI-assisted workflow drafting that turns natural-language requests into editable plans, using FreeLLMAPI's unified model routing or locally hosted Qwen models through Ollama.
+\item Connected proposals to a deterministic execution engine with \textbf{schema-validated inputs}, conditional branches, and step-to-step data mapping across \textbf{18 registered actions}; workflows support up to \textbf{50 steps}.
+\item Implemented a visual builder, immutable workflow versions, and run tracing on a durable \textbf{PostgreSQL} queue with a separate worker; added approval gates and role-based access for controlled execution.
+\end{itemize}
+%---------------- TECHNICAL SKILLS ----------------%
+
+\sectionheading{Technical Skills}
+
+\begingroup
+\sloppy
+\begin{itemize}
+\item \textbf{Languages:} Java, Python, C, JavaScript, TypeScript, SQL
+\item \textbf{AI/ML:} Machine Learning, Deep Learning, NLP, Transformer Fundamentals, NumPy, Pandas, Matplotlib, PyTorch, Scikit-learn
+\item \textbf{Frameworks \& APIs:} React.js, Next.js, Express.js, FastAPI, REST APIs, WebSockets
+\item \textbf{Databases \& Data Access:} PostgreSQL (Neon), SQLAlchemy, Alembic, Oracle, MongoDB, Redis, Prisma
+\item \textbf{Tools \& Platforms:} Linux, Git, GitHub, Docker, Postman, Ollama, FreeLLMAPI, CI/CD
+\item \textbf{Core CS:} Data Structures and Algorithms, Object-Oriented Programming, DBMS, Computer Networks
+\end{itemize}
+\endgroup
+
+%---------------- LEADERSHIP ----------------%
+\sectionheading{Leadership}
+
+\begin{itemize}
+\item \textbf{Deputy Lead, CyberSecurity -- \href{https://www.linkedin.com/company/ssn-coding-club/home/}{SSN Coding Club}:} Organized CTF competitions, mentored students through hands-on cybersecurity challenges, and conducted workshops and technical sessions on practical security concepts.
+
+\item \textbf{Technical Team Member -- \href{https://www.linkedin.com/company/ssn-ai-student-chapter/home/}{AI Student Chapter}:} Organized AI workshops, technical events, and hands-on learning sessions for students as part of the chapter's technical team.
+\end{itemize}
+%---------------- ACHIEVEMENTS ----------------%
+
+\sectionheading{Achievements}
+
+\begin{itemize}
+\item \textbf{Finalist -- ImpactNexus Hackathon, Coding Club SSN:} Finished among the top 25 out of 400+ participating teams.
+
+\item \textbf{3rd Place -- Capture The Flag Competition, SNU Chennai:} Placed 3rd among 150+ teams by solving challenges in reverse engineering, cryptography, web exploitation, and digital forensics.
+
+
+\item \textbf{Top 4\% -- Trivarna CTF:} Placed among the top 4\% of 300+ international teams, finishing 11th overall by solving challenges in cryptography, hardware exploitation, reverse engineering, and web security.
+\end{itemize}
+
+\end{document}

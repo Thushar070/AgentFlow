@@ -26,7 +26,7 @@ def upgrade() -> None:
         ("step_runs", "ck_step_error_category"),
         ("step_attempts", "ck_step_attempt_error_category"),
     ):
-        with op.batch_alter_table(table, recreate="always") as batch:
+        with op.batch_alter_table(table, recreate="auto") as batch:
             batch.drop_constraint(constraint, type_="check")
             batch.create_check_constraint(
                 constraint, f"error_category IS NULL OR error_category IN ({_CATEGORIES})"

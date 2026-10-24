@@ -216,7 +216,7 @@ def _upgrade_phase1_schema(connection) -> None:
         "finished_at=COALESCE(finished_at, CURRENT_TIMESTAMP) "
         "WHERE status IN ('queued', 'running')"
     )
-    with op.batch_alter_table("workflow_runs", recreate="always") as batch:
+    with op.batch_alter_table("workflow_runs", recreate="auto") as batch:
         batch.alter_column("workflow_version_id", existing_type=sa.Integer(), nullable=False)
         batch.create_foreign_key(
             "fk_run_version_workflow",
@@ -238,7 +238,7 @@ def _upgrade_phase1_schema(connection) -> None:
         order = next_order.get(run_id, 0)
         connection.exec_driver_sql("UPDATE step_runs SET step_order=? WHERE id=?", (order, row_id))
         next_order[run_id] = order + 1
-    with op.batch_alter_table("step_runs", recreate="always") as batch:
+    with op.batch_alter_table("step_runs", recreate="auto") as batch:
         batch.alter_column("step_order", existing_type=sa.Integer(), nullable=False)
         batch.create_unique_constraint("uq_step_run_id", ["run_id", "step_id"])
         batch.create_unique_constraint("uq_step_run_order", ["run_id", "step_order"])
@@ -253,7 +253,7 @@ def _upgrade_phase1_schema(connection) -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )
     connection.exec_driver_sql("UPDATE workflows SET updated_at=created_at")
-    with op.batch_alter_table("workflows", recreate="always") as batch:
+    with op.batch_alter_table("workflows", recreate="auto") as batch:
         batch.alter_column("updated_at", existing_type=sa.DateTime(timezone=True), nullable=False)
         batch.drop_column("definition")
     op.create_index("ix_workflows_name", "workflows", ["name"])
@@ -263,11 +263,15 @@ def _upgrade_phase1_schema(connection) -> None:
 
 def upgrade() -> None:
     connection = op.get_bind()
-    if connection.dialect.name != "sqlite":
-        raise RuntimeError("Phase 2 migration is currently verified for SQLite only")
     tables = set(sa.inspect(connection).get_table_names()) - {"alembic_version"}
     if not tables:
         _create_fresh_schema()
+    elif connection.dialect.name != "sqlite":
+        raise RuntimeError(
+            "The legacy Phase 1 schema can only be upgraded in place on SQLite. "
+            "For PostgreSQL, create a fresh database and transfer data with the "
+            "SQLite-to-PostgreSQL migration utility."
+        )
     elif tables == {"workflows", "workflow_versions", "workflow_runs", "step_runs"}:
         columns = {
             table: {column["name"] for column in sa.inspect(connection).get_columns(table)}

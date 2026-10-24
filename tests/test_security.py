@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 from conftest import run_worker_once
 from fastapi.testclient import TestClient
@@ -18,10 +19,10 @@ from agentflow.models import (
     WorkflowRun,
     utcnow,
 )
-from agentflow.security import redact
+from agentflow.security import ApiRateLimitMiddleware, redact
 
 ORIGIN = "http://localhost:3000"
-PASSWORD = "test-password-long-123!"
+PASSWORD = "Test1!pw"
 
 
 def login_as(parent, username, password=PASSWORD):
@@ -55,14 +56,14 @@ def test_authentication_cookie_csrf_logout_and_expiry(client):
         "/api/auth/login",
         json={
             "username_or_email": "test-admin",
-            "password": "test-admin-password-123!",
+            "password": "Admin1!x",
         },
     )
     cookie_header = login_response.headers["set-cookie"]
     assert "HttpOnly" in cookie_header
     assert "SameSite=lax" in cookie_header
     assert "Path=/" in cookie_header
-    assert "test-admin-password-123!" not in cookie_header
+    assert "Admin1!x" not in cookie_header
     cookie = client.cookies.get("agentflow_session")
     assert cookie
     set_cookie = client.cookies  # The response attributes are covered by the login response below.
@@ -83,6 +84,25 @@ def test_authentication_cookie_csrf_logout_and_expiry(client):
     finally:
         engine.dispose()
     assert client.get("/api/workflows").status_code == 401
+
+
+def test_security_headers_and_local_host_allowlist(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["cache-control"] == "no-store"
+    denied = client.get("/health", headers={"Host": "outside.example"})
+    assert denied.status_code == 400
+
+
+def test_process_local_rate_limit_fallback_enforces_window():
+    key = f"test-rate-limit-{time.time_ns()}"
+    windows = ((60, 2),)
+    now = int(time.time())
+    assert ApiRateLimitMiddleware._memory_increment([key], windows, now) == 0
+    assert ApiRateLimitMiddleware._memory_increment([key], windows, now) == 0
+    assert ApiRateLimitMiddleware._memory_increment([key], windows, now) == 1
 
 
 def test_unauthenticated_routes_and_passwords_are_protected(client):
@@ -106,7 +126,7 @@ def test_unauthenticated_routes_and_passwords_are_protected(client):
         with factory() as session:
             user = session.get(User, client.test_admin_id)
             assert user.password_hash.startswith("$argon2id$")
-            assert "test-admin-password-123!" not in user.password_hash
+            assert "Admin1!x" not in user.password_hash
             assert session.scalar(
                 select(AuditEvent).where(AuditEvent.event_type == "auth.login_failed")
             )
@@ -125,12 +145,12 @@ def test_logout_password_change_and_last_admin_invalidation(client):
     assert client.post("/api/auth/logout").status_code == 200
     assert client.get("/api/workflows").status_code == 401
 
-    signed_in = login_as(client, "test-admin", "test-admin-password-123!")
+    signed_in = login_as(client, "test-admin", "Admin1!x")
     changed = signed_in.post(
         "/api/auth/password",
         json={
-            "current_password": "test-admin-password-123!",
-            "new_password": "replacement-password-456!",
+            "current_password": "Admin1!x",
+            "new_password": "New1!abc",
         },
     )
     assert changed.status_code == 200
@@ -138,14 +158,14 @@ def test_logout_password_change_and_last_admin_invalidation(client):
     assert (
         signed_in.post(
             "/api/auth/login",
-            json={"username_or_email": "test-admin", "password": "test-admin-password-123!"},
+            json={"username_or_email": "test-admin", "password": "Admin1!x"},
         ).status_code
         == 401
     )
     assert (
         signed_in.post(
             "/api/auth/login",
-            json={"username_or_email": "test-admin", "password": "replacement-password-456!"},
+            json={"username_or_email": "test-admin", "password": "New1!abc"},
         ).status_code
         == 200
     )
@@ -180,13 +200,13 @@ def test_admin_bootstrap_is_one_time_and_interactive(tmp_path, monkeypatch):
     monkeypatch.setattr(admin_module, "SessionLocal", factory)
     answers = iter(["bootstrap-admin", "admin@example.test"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    passwords = iter(["bootstrap-password-123!", "bootstrap-password-123!"])
+    passwords = iter(["Boot1!pw", "Boot1!pw"])
     monkeypatch.setattr(admin_module.getpass, "getpass", lambda _prompt: next(passwords))
     assert admin_module.bootstrap_admin() == 0
 
     answers = iter(["another-admin", "another@example.test"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    passwords = iter(["bootstrap-password-456!", "bootstrap-password-456!"])
+    passwords = iter(["Boot2!pw", "Boot2!pw"])
     monkeypatch.setattr(admin_module.getpass, "getpass", lambda _prompt: next(passwords))
     assert admin_module.bootstrap_admin() == 1
     with factory() as session:
@@ -419,7 +439,7 @@ def test_login_and_run_creation_limits_are_bounded(client, monkeypatch, valid_de
             "/api/auth/login",
             json={
                 "username_or_email": "test-admin",
-                "password": "test-admin-password-123!",
+                "password": "Admin1!x",
             },
         ).status_code
         == 429

@@ -30,13 +30,13 @@ def upgrade() -> None:
         sa.UniqueConstraint("email_normalized", name="uq_users_email_normalized"),
         sa.CheckConstraint("role IN ('admin', 'operator', 'approver')", name="ck_user_role"),
     )
-    with op.batch_alter_table("workflows", recreate="always") as batch:
+    with op.batch_alter_table("workflows", recreate="auto") as batch:
         batch.add_column(sa.Column("owner_id", sa.Integer(), nullable=True))
         batch.create_foreign_key(
             "fk_workflows_owner_id_users", "users", ["owner_id"], ["id"], ondelete="SET NULL"
         )
     op.create_index("ix_workflows_owner_id", "workflows", ["owner_id"])
-    with op.batch_alter_table("workflow_runs", recreate="always") as batch:
+    with op.batch_alter_table("workflow_runs", recreate="auto") as batch:
         batch.add_column(sa.Column("created_by_id", sa.Integer(), nullable=True))
         batch.create_foreign_key(
             "fk_workflow_runs_created_by_users",
@@ -59,7 +59,7 @@ def upgrade() -> None:
             "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
             "'approval_rejected')",
         )
-    with op.batch_alter_table("step_runs", recreate="always") as batch:
+    with op.batch_alter_table("step_runs", recreate="auto") as batch:
         batch.drop_constraint("ck_step_error_category", type_="check")
         batch.create_check_constraint(
             "ck_step_error_category",
@@ -68,7 +68,7 @@ def upgrade() -> None:
             "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
             "'approval_rejected')",
         )
-    with op.batch_alter_table("step_attempts", recreate="always") as batch:
+    with op.batch_alter_table("step_attempts", recreate="auto") as batch:
         batch.drop_constraint("ck_step_attempt_error_category", type_="check")
         batch.create_check_constraint(
             "ck_step_attempt_error_category",
@@ -77,7 +77,7 @@ def upgrade() -> None:
             "'retries_exhausted', 'worker_interrupted', 'cancelled', 'reconciliation_required', "
             "'approval_rejected')",
         )
-    with op.batch_alter_table("workflow_jobs", recreate="always") as batch:
+    with op.batch_alter_table("workflow_jobs", recreate="auto") as batch:
         batch.drop_constraint("ck_workflow_job_status", type_="check")
         batch.create_check_constraint(
             "ck_workflow_job_status",

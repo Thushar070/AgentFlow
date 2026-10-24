@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { cachedStaticApiRead } from "../lib/static-api-cache";
 import {
   FormEvent,
   useCallback,
@@ -13,6 +14,15 @@ import {
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001";
 let csrfToken = "";
+const proposalModels = [
+  {
+    id: "freellmapi",
+    label: "FreeLLMAPI · automatic model routing",
+    description:
+      "Uses the FreeLLMAPI unified key and its active fallback chain to route across enabled models automatically.",
+  },
+] as const;
+type ProposalModelId = (typeof proposalModels)[number]["id"];
 type User = { id: number; username: string; email: string; role: string };
 type FieldSchema = {
   type?: string;
@@ -156,6 +166,8 @@ const navItems = [
 ];
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("Content-Type"))
     headers.set("Content-Type", "application/json");
@@ -165,28 +177,31 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     csrfToken
   )
     headers.set("X-CSRF-Token", csrfToken);
-  const response = await fetch(`${API}${path}`, {
-    ...init,
-    signal: init?.signal ?? AbortSignal.timeout(15000),
-    credentials: "include",
-    headers,
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    const detail = payload.detail;
-    const message = Array.isArray(detail)
-      ? detail
-          .map(
-            (item: { loc?: unknown[]; msg?: string }) =>
-              `${Array.isArray(item.loc) ? item.loc.join(".") : "Request"}: ${item.msg ?? "Invalid value."}`,
-          )
-          .join("; ")
-      : typeof detail === "string"
+  const request = async () => {
+    const response = await fetch(`${API}${path}`, {
+      ...init,
+      signal: init?.signal ?? AbortSignal.timeout(15000),
+      credentials: "include",
+      headers,
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      const detail = payload.detail;
+      const message = Array.isArray(detail)
         ? detail
-        : JSON.stringify(detail);
-    throw new ApiError(message, response.status);
-  }
-  return payload as T;
+            .map(
+              (item: { loc?: unknown[]; msg?: string }) =>
+                `${Array.isArray(item.loc) ? item.loc.join(".") : "Request"}: ${item.msg ?? "Invalid value."}`,
+            )
+            .join("; ")
+        : typeof detail === "string"
+          ? detail
+          : JSON.stringify(detail);
+      throw new ApiError(message, response.status);
+    }
+    return payload;
+  };
+  return method === "GET" ? cachedStaticApiRead(path, request) : request();
 }
 
 function slugFor(pathname: string) {
@@ -360,7 +375,7 @@ export default function Home() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [actions, setActions] = useState<Action[]>([]);
   const [examples, setExamples] = useState<ExampleTemplate[]>([]);
-  const [apiReady, setApiReady] = useState(false);
+  const [apiReady, setApiReady] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -374,6 +389,12 @@ export default function Home() {
   const [canLoadMoreAudit, setCanLoadMoreAudit] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [workflowDescription, setWorkflowDescription] = useState("");
+  const [proposalPrompt, setProposalPrompt] = useState("");
+  const [proposalModel, setProposalModel] =
+    useState<ProposalModelId>("freellmapi");
+  const [proposalBusy, setProposalBusy] = useState(false);
+  const [proposalError, setProposalError] = useState("");
+  const [proposalReady, setProposalReady] = useState(false);
   const [workflowInputSchema, setWorkflowInputSchema] = useState<
     Record<string, WorkflowInputField>
   >({});
@@ -411,6 +432,7 @@ export default function Home() {
   }, []);
   const refresh = useCallback(async () => {
     setLoading(true);
+    setApiReady(null);
     try {
       const auth = await api<{ user: User; csrf_token: string }>(
         "/api/auth/me",
@@ -465,17 +487,15 @@ export default function Home() {
     );
   }, [user?.id]);
   useEffect(() => {
-    if (
-      section !== "runs" ||
-      !Number.isFinite(routeId) ||
-      routeId < 1 ||
-      runs.some((run) => run.id === routeId)
-    )
-      return;
+    if (section !== "runs" || !Number.isFinite(routeId) || routeId < 1) return;
     let cancelled = false;
     void api<Run>(`/api/runs/${routeId}`)
       .then((run) => {
-        if (!cancelled) setRuns((current) => [run, ...current]);
+        if (!cancelled)
+          setRuns((current) => [
+            run,
+            ...current.filter((item) => item.id !== run.id),
+          ]);
       })
       .catch((cause) => {
         if (!cancelled) report(cause, "This run could not be loaded.");
@@ -483,7 +503,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [section, routeId, runs, report]);
+  }, [section, routeId, report]);
   useEffect(() => {
     if (
       !runs.some((run) => activeStatuses.has(run.status)) &&
@@ -497,7 +517,10 @@ export default function Home() {
       ])
         .then(([r, a]) => {
           setRuns(r);
-          setApprovals(a);
+          setApprovals((current) => {
+            const decided = current.filter((item) => item.status !== "pending");
+            return [...decided, ...a];
+          });
         })
         .catch((cause) => report(cause, "Could not refresh workflow status."));
     }, 2500);
@@ -548,6 +571,9 @@ export default function Home() {
     setWorkflowInputNameDrafts({});
     setBuilderSteps([]);
     setValidation("");
+    setProposalPrompt("");
+    setProposalError("");
+    setProposalReady(false);
   }
   function startEdit(workflow: Workflow) {
     const unsupportedBranch = workflow.definition.steps.some((step) => {
@@ -865,6 +891,45 @@ export default function Home() {
       setBusy(false);
     }
   }
+  async function generateWorkflowProposal() {
+    setProposalError("");
+    if (!proposalPrompt.trim()) {
+      setProposalError("Describe the workflow you want to create.");
+      return;
+    }
+    setProposalBusy(true);
+    try {
+      const proposed = await api<Workflow["definition"]>(
+        "/api/workflows/proposals",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            prompt: proposalPrompt.trim(),
+            model_id: proposalModel,
+          }),
+          signal: AbortSignal.timeout(310_000),
+        },
+      );
+      const editable = fromDefinition(proposed);
+      setEditingId(null);
+      setWorkflowName(editable.name);
+      setWorkflowDescription(editable.description);
+      setWorkflowInputSchema(editable.inputSchema);
+      setWorkflowInputNameDrafts({});
+      setBuilderSteps(editable.steps);
+      setValidation("");
+      setProposalReady(true);
+    } catch (cause) {
+      setProposalReady(false);
+      setProposalError(
+        cause instanceof Error
+          ? cause.message
+          : "AgentFlow could not generate a workflow proposal.",
+      );
+    } finally {
+      setProposalBusy(false);
+    }
+  }
   async function createFromExample(template: ExampleTemplate) {
     setBusy(true);
     try {
@@ -966,11 +1031,13 @@ export default function Home() {
   async function decideApproval(id: number, decision: "approved" | "rejected") {
     setBusy(true);
     try {
-      await api(`/api/approvals/${id}/decision`, {
+      const updated = await api<Approval>(`/api/approvals/${id}/decision`, {
         method: "POST",
         body: JSON.stringify({ decision, reason: approvalReasons[id] || null }),
       });
-      await refresh();
+      setApprovals((current) =>
+        current.map((item) => (item.id === id ? updated : item)),
+      );
     } catch (cause) {
       report(cause, "Approval decision failed.");
     } finally {
@@ -1119,8 +1186,15 @@ export default function Home() {
           <span className="brand-mark">A</span>
           <span>AgentFlow</span>
         </Link>
-        <span className={`connection ${apiReady ? "online" : "offline"}`}>
-          <i /> {apiReady ? "API connected" : "API unavailable"}
+        <span
+          className={`connection ${apiReady === null ? "checking" : apiReady ? "online" : "offline"}`}
+        >
+          <i />
+          {apiReady === null
+            ? "Checking API…"
+            : apiReady
+              ? "API connected"
+              : "API unavailable"}
         </span>
         <div className="eyebrow">SECURE WORKSPACE</div>
         <h1>Sign in</h1>
@@ -1210,9 +1284,15 @@ export default function Home() {
               : section.charAt(0).toUpperCase() + section.slice(1)}
           </div>
           <div className="topbar-right">
-            <span className={`connection ${apiReady ? "online" : "offline"}`}>
+            <span
+              className={`connection ${apiReady === null ? "checking" : apiReady ? "online" : "offline"}`}
+            >
               <i />
-              {apiReady ? "API connected" : "API unavailable"}
+              {apiReady === null
+                ? "Checking API…"
+                : apiReady
+                  ? "API connected"
+                  : "API unavailable"}
             </span>
             <span className="user-chip">
               <span className="avatar">
@@ -1637,6 +1717,81 @@ export default function Home() {
                 noValidate
               >
                 <div className="builder-main">
+                  {!editingId && (
+                    <section className="panel proposal-panel">
+                      <div className="section-heading">
+                        <div>
+                          <p className="eyebrow">OPTIONAL AI ASSIST</p>
+                          <h2>Describe a workflow</h2>
+                        </div>
+                        <span className="helper">Preview only</span>
+                      </div>
+                      <p className="helper">
+                        The configured AI gateway can draft registered actions
+                        for you. Review and edit the proposal below; it is not
+                        saved or run until you choose those actions.
+                      </p>
+                      <label htmlFor="proposal-model">AI model</label>
+                      <select
+                        id="proposal-model"
+                        value={proposalModel}
+                        onChange={(event) =>
+                          setProposalModel(
+                            event.target.value as ProposalModelId,
+                          )
+                        }
+                        disabled={proposalBusy}
+                      >
+                        {proposalModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="helper" aria-live="polite">
+                        {
+                          proposalModels.find(
+                            (model) => model.id === proposalModel,
+                          )?.description
+                        }
+                      </p>
+                      <label htmlFor="workflow-prompt">
+                        What should this workflow do?
+                      </label>
+                      <textarea
+                        id="workflow-prompt"
+                        rows={3}
+                        maxLength={4000}
+                        value={proposalPrompt}
+                        onChange={(event) =>
+                          setProposalPrompt(event.target.value)
+                        }
+                        placeholder="Convert customer names to uppercase and append a suffix."
+                      />
+                      <button
+                        type="button"
+                        className="button secondary"
+                        onClick={() => void generateWorkflowProposal()}
+                        disabled={proposalBusy || busy}
+                      >
+                        {proposalBusy
+                          ? "Generating proposal…"
+                          : "Generate proposal"}
+                      </button>
+                      {proposalError && (
+                        <p className="validation-summary" role="alert">
+                          {proposalError}
+                        </p>
+                      )}
+                      {proposalReady && (
+                        <p className="success-alert" role="status">
+                          Proposal ready. Review the generated steps, edit as
+                          needed, then explicitly save it. Running it is a
+                          separate action after saving.
+                        </p>
+                      )}
+                    </section>
+                  )}
                   <section className="panel">
                     <div className="section-heading">
                       <div>
@@ -2422,8 +2577,9 @@ export default function Home() {
                         <time>{formatDate(item.created_at)}</time>
                       </div>
                       <p>
-                        This action is waiting for a human decision before the
-                        worker can continue.
+                        {item.status === "pending"
+                          ? "This action is waiting for a human decision before the worker can continue."
+                          : `This request was ${item.status}.`}
                       </p>
                       <div className="approval-context">
                         <span>
@@ -2616,8 +2772,10 @@ export default function Home() {
                     value={newPassword}
                     onChange={(event) => setNewPassword(event.target.value)}
                     required
-                    minLength={12}
-                    maxLength={1024}
+                    minLength={8}
+                    maxLength={8}
+                    pattern="(?=.*[0-9])(?=.*[^A-Za-z0-9\\s]).{8}"
+                    title="Use exactly 8 characters, including at least one number and one symbol."
                   />
                   <label htmlFor="new-role">Role</label>
                   <select
@@ -2633,8 +2791,8 @@ export default function Home() {
                     Create account
                   </button>
                   <p className="helper">
-                    Passwords are hashed by the backend and never returned by
-                    the API.
+                    Use exactly 8 characters, including a number and a symbol.
+                    Passwords are hashed and never returned by the API.
                   </p>
                 </form>
                 <section className="panel role-guide">

@@ -24,13 +24,13 @@ test:
 	pytest
 
 lint:
-	ruff check agentflow tests migrations
+	ruff check src/agentflow tests migrations
 	cd apps/web && npm run lint && npm run typecheck
 
 format:
-	ruff format agentflow tests migrations
+	ruff format src/agentflow tests migrations
 	cd apps/web && npm run format
 
 format-check:
-	ruff format --check agentflow tests migrations
+	ruff format --check src/agentflow tests migrations
 	cd apps/web && npm run format:check

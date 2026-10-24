@@ -24,9 +24,20 @@ DUMMY_PASSWORD_HASH = (
 )
 
 
+def validate_password(password: str) -> str:
+    has_number = any("0" <= character <= "9" for character in password)
+    has_symbol = any(
+        not character.isalnum() and not character.isspace() for character in password
+    )
+    if len(password) != 8 or not has_number or not has_symbol:
+        raise ValueError(
+            "Password must be exactly 8 characters and include a number and a symbol."
+        )
+    return password
+
+
 def hash_password(password: str) -> str:
-    if len(password) < 12 or len(password) > 1024:
-        raise ValueError("Password must be between 12 and 1024 characters.")
+    validate_password(password)
     return PASSWORDS.hash(password)
 
 

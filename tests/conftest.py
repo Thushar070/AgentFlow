@@ -23,7 +23,13 @@ def client(tmp_path, monkeypatch):
 
     get_settings.cache_clear()
     database_url = f"sqlite:///{tmp_path / 'test.db'}"
-    environment = {**os.environ, "DATABASE_URL": database_url}
+    environment = {
+        **os.environ,
+        "APP_ENV": "test",
+        "DATABASE_URL": database_url,
+        # Do not let the developer's direct Neon URL override the isolated test DB.
+        "DATABASE_URL_UNPOOLED": "",
+    }
     migration = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=ROOT,
@@ -49,7 +55,7 @@ def client(tmp_path, monkeypatch):
                 username_normalized="test-admin",
                 email="test-admin@example.test",
                 email_normalized="test-admin@example.test",
-                password_hash=hash_password("test-admin-password-123!"),
+                password_hash=hash_password("Admin1!x"),
                 role="admin",
                 is_active=True,
                 created_at=utcnow(),
@@ -71,7 +77,7 @@ def client(tmp_path, monkeypatch):
                 "/api/auth/login",
                 json={
                     "username_or_email": "test-admin",
-                    "password": "test-admin-password-123!",
+                    "password": "Admin1!x",
                 },
             )
             if login.status_code != 200:
@@ -86,7 +92,12 @@ def client(tmp_path, monkeypatch):
 
 
 def run_worker_once(client):
-    environment = {**os.environ, "DATABASE_URL": client.agentflow_database_url}
+    environment = {
+        **os.environ,
+        "APP_ENV": "test",
+        "DATABASE_URL": client.agentflow_database_url,
+        "DATABASE_URL_UNPOOLED": "",
+    }
     result = subprocess.run(
         [sys.executable, "-m", "agentflow.worker", "--once"],
         cwd=ROOT,

@@ -28,7 +28,7 @@ def upgrade() -> None:
     op.add_column(
         "workflow_runs", sa.Column("cancel_requested_at", sa.DateTime(timezone=True), nullable=True)
     )
-    with op.batch_alter_table("workflow_runs", recreate="always") as batch:
+    with op.batch_alter_table("workflow_runs", recreate="auto") as batch:
         batch.drop_constraint("ck_run_status", type_="check")
         batch.drop_constraint("ck_run_error_category", type_="check")
         batch.create_check_constraint("ck_run_status", f"status IN ({RUN_STATUSES})")
@@ -37,7 +37,7 @@ def upgrade() -> None:
             f"error_category IS NULL OR error_category IN ({ERROR_CATEGORIES})",
         )
         batch.create_unique_constraint("uq_run_idempotency_key", ["workflow_id", "idempotency_key"])
-    with op.batch_alter_table("step_runs", recreate="always") as batch:
+    with op.batch_alter_table("step_runs", recreate="auto") as batch:
         batch.drop_constraint("ck_step_run_status", type_="check")
         batch.drop_constraint("ck_step_error_category", type_="check")
         batch.create_check_constraint("ck_step_run_status", f"status IN ({STEP_STATUSES})")

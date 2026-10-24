@@ -1,0 +1,17 @@
+{
+  "dependencies": {
+    "@neon/config": "^1.9.3",
+    "@neon/env": "^1.6.4",
+    "@neon/functions": "^0.11.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "build": "npm --prefix apps/web run build && npm run typecheck",
+    "typecheck": "tsc --noEmit"
+  }
+}

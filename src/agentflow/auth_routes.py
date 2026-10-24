@@ -4,7 +4,7 @@ import hmac
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -26,6 +26,7 @@ from agentflow.auth import (
     require_roles,
     require_user,
     set_session_cookie,
+    validate_password,
     verify_password,
 )
 from agentflow.database import get_session
@@ -44,7 +45,11 @@ Email = Annotated[
         pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$",
     ),
 ]
-Password = Annotated[str, StringConstraints(min_length=12, max_length=1024)]
+Password = Annotated[
+    str,
+    StringConstraints(min_length=8, max_length=8),
+    AfterValidator(validate_password),
+]
 
 
 class LoginInput(BaseModel):

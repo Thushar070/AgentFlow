@@ -1,5 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -13,13 +21,17 @@ const databasePath = resolve(scratch, "agentflow.db");
 const apiPort = "18001";
 const webPort = "13000";
 const mockPort = "18002";
+const freeLLMApiMockPort = "18003";
 const apiUrl = `http://localhost:${apiPort}`;
 const webUrl = `http://localhost:${webPort}`;
-const password = "E2E-only.AgentFlow!2026";
+const password = "E2e1!pwX";
 const python = resolve(root, ".venv/bin/python");
-const runtimeEnv = {
+const apiEnv = {
   ...process.env,
   DATABASE_URL: `sqlite:///${databasePath}`,
+  // Do not let a developer's Neon direct URL from .env override the isolated
+  // SQLite URL in migrations/env.py.
+  DATABASE_URL_UNPOOLED: "",
   API_HOST: "127.0.0.1",
   API_PORT: apiPort,
   CORS_ORIGINS: JSON.stringify([webUrl]),
@@ -27,6 +39,9 @@ const runtimeEnv = {
   APP_ENV: "test",
   HTTP_ALLOWED_HOSTS: JSON.stringify(["127.0.0.1"]),
   HTTP_ALLOWED_PORTS: JSON.stringify([Number(mockPort)]),
+  FREELLMAPI_BASE_URL: `http://127.0.0.1:${freeLLMApiMockPort}/v1`,
+  FREELLMAPI_API_KEY: "e2e-unified-key",
+  FREELLMAPI_TIMEOUT_SECONDS: "5",
   APPROVAL_REQUIRED_ACTIONS: JSON.stringify(["append"]),
   NEXT_PUBLIC_API_URL: apiUrl,
   E2E_WEB_URL: webUrl,
@@ -38,12 +53,15 @@ const runtimeEnv = {
   PLAYWRIGHT_CHROME_PATH:
     process.env.PLAYWRIGHT_CHROME_PATH ?? "/usr/bin/google-chrome",
 };
+const browserEnv = { ...apiEnv };
+delete browserEnv.FREELLMAPI_API_KEY;
+delete browserEnv.REDIS_URL;
 const processes = [];
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? root,
-    env: runtimeEnv,
+    env: options.env ?? browserEnv,
     encoding: "utf8",
     stdio: options.stdio ?? "inherit",
   });
@@ -77,10 +95,10 @@ function prepareIsolatedWeb() {
   );
 }
 
-function start(command, args, cwd) {
+function start(command, args, cwd, env = browserEnv) {
   const child = spawn(command, args, {
     cwd,
-    env: runtimeEnv,
+    env,
     stdio: "inherit",
     detached: true,
   });
@@ -89,6 +107,34 @@ function start(command, args, cwd) {
     console.error(`Could not start ${command}: ${error.message}`);
   });
   return child;
+}
+
+function assertGatewayKeyNotInFrontendBundles() {
+  const staticRoots = [];
+  function visit(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "static") staticRoots.push(path);
+        else visit(path);
+      }
+    }
+  }
+  visit(resolve(isolatedWebRoot, ".next"));
+  for (const root of staticRoots) {
+    const inspect = (directory) => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = resolve(directory, entry.name);
+        if (entry.isDirectory()) inspect(path);
+        else if (readFileSync(path).includes(Buffer.from("e2e-unified-key"))) {
+          throw new Error(
+            "FreeLLMAPI test key leaked into a frontend static bundle.",
+          );
+        }
+      }
+    };
+    inspect(root);
+  }
 }
 
 async function waitFor(url, child, label) {
@@ -165,6 +211,7 @@ try {
   await assertPortAvailable(Number(apiPort));
   await assertPortAvailable(Number(webPort));
   await assertPortAvailable(Number(mockPort));
+  await assertPortAvailable(Number(freeLLMApiMockPort));
   run(python, ["-m", "alembic", "upgrade", "head"]);
   run(python, [
     "-c",
@@ -191,6 +238,19 @@ try {
     root,
   );
   await waitFor(`http://127.0.0.1:${mockPort}`, mockServer, "mock API");
+  const freeLLMApiMockServer = start(
+    process.execPath,
+    [
+      "-e",
+      `require("node:http").createServer((request, response) => { let body = ""; request.on("data", chunk => body += chunk); request.on("end", () => { if (request.url !== "/v1/chat/completions") { response.writeHead(200,{"content-type":"application/json"}); response.end(JSON.stringify({ok:true})); return; } const input = JSON.parse(body); if (request.headers.authorization !== "Bearer e2e-unified-key" || input.stream !== false || input.model !== "auto" || input.response_format?.type !== "json_schema" || !input.response_format?.json_schema?.schema?.properties?.steps) { response.writeHead(400); response.end("unsupported request"); return; } const text = input.messages.find(message => message.role === "user")?.content ?? ""; const invalid = text.toLowerCase().includes("invalid action"); const definition = invalid ? {version:1,name:"Invalid proposal",steps:[{id:"bad",action:"shell",inputs:{command:"echo unsafe"}}]} : {version:1,name:"Generated text workflow",description:"Uppercase a customer name and append a suffix.",input_schema:{customer_name:{type:"string",required:true},suffix:{type:"string",required:true}},steps:[{id:"source",action:"set_value",inputs:{value:{"$input":"customer_name"}}},{id:"uppercase_name",action:"uppercase",inputs:{value:{"$ref":"source"}}},{id:"append_suffix",action:"append",inputs:{value:{"$ref":"uppercase_name"},suffix:{"$input":"suffix"}}}]}; response.writeHead(200,{"content-type":"application/json"}); response.end(JSON.stringify({model:"mock/test",choices:[{index:0,message:{role:"assistant",content:JSON.stringify(definition)},finish_reason:"stop"}]})); }); }).listen(${freeLLMApiMockPort}, "127.0.0.1");`,
+    ],
+    root,
+  );
+  await waitFor(
+    `http://127.0.0.1:${freeLLMApiMockPort}`,
+    freeLLMApiMockServer,
+    "mock FreeLLMAPI",
+  );
   const api = start(
     python,
     [
@@ -203,6 +263,7 @@ try {
       apiPort,
     ],
     root,
+    apiEnv,
   );
   await waitFor(`${apiUrl}/health`, api, "API");
   const web = start(
@@ -219,6 +280,7 @@ try {
       cwd: isolatedWebRoot,
     },
   );
+  assertGatewayKeyNotInFrontendBundles();
   completed = true;
 } finally {
   if (!interrupted) await stopAll();

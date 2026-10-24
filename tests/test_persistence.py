@@ -35,7 +35,7 @@ REVISION = "d142f6a8c903"
 
 
 def run_migration(database_url: str, revision: str = "head"):
-    env = {**os.environ, "DATABASE_URL": database_url}
+    env = {**os.environ, "APP_ENV": "test", "DATABASE_URL": database_url}
     return subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", revision],
         cwd=ROOT,

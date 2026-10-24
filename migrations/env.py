@@ -17,7 +17,9 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+settings = get_settings()
+migration_url = settings.database_url_unpooled or settings.database_url
+config.set_main_option("sqlalchemy.url", migration_url.replace("%", "%%"))
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

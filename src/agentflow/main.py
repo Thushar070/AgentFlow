@@ -14,13 +14,16 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from agentflow.ai_proposals import router as ai_proposals_router
 from agentflow.approval_routes import router as approval_router
 from agentflow.audit import audit_response, correlation_id, record_event
 from agentflow.auth import require_roles, require_user
 from agentflow.auth_routes import admin_router
 from agentflow.auth_routes import router as auth_router
 from agentflow.authorization import get_owned_run, get_owned_workflow
+from agentflow.cache import cached_json
 from agentflow.config import get_settings
 from agentflow.contracts import RunRequest, RunResponse, WorkflowResponse, WorkflowVersionResponse
 from agentflow.database import engine, get_session
@@ -38,7 +41,13 @@ from agentflow.models import (
     utcnow,
 )
 from agentflow.registry import ACTION_REGISTRY, action_catalog
-from agentflow.security import RequestLimitMiddleware, redact, redact_text
+from agentflow.security import (
+    ApiRateLimitMiddleware,
+    RequestLimitMiddleware,
+    SecurityHeadersMiddleware,
+    redact,
+    redact_text,
+)
 from agentflow.workflows import (
     WorkflowDefinition,
     executable_step_count,
@@ -57,7 +66,7 @@ def _alembic_config():
 
     from alembic.config import Config
 
-    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     return config
 
 
@@ -84,6 +93,7 @@ app = FastAPI(title="AgentFlow API", version="0.2.0", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(approval_router)
+app.include_router(ai_proposals_router)
 app.add_middleware(RequestLimitMiddleware, max_bytes=get_settings().max_request_body_bytes)
 app.add_middleware(
     CORSMiddleware,
@@ -92,6 +102,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "OPTIONS", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Idempotency-Key", "X-CSRF-Token"],
 )
+trusted_hosts = ["localhost", "127.0.0.1", "::1", "testserver"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
+app.add_middleware(ApiRateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 logger = logging.getLogger("agentflow.api")
 
 
@@ -144,7 +158,7 @@ def health(session: Session = Depends(get_session)):
 
 @app.get("/api/actions")
 def list_actions(_actor: User = Depends(require_user)):
-    return action_catalog()
+    return cached_json("agentflow:v1:actions", action_catalog)
 
 
 @app.get("/api/examples")

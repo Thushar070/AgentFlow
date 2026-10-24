@@ -13,7 +13,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("step_runs", recreate="always") as batch:
+    with op.batch_alter_table("step_runs", recreate="auto") as batch:
         batch.drop_constraint("ck_step_run_status", type_="check")
         batch.create_check_constraint(
             "ck_step_run_status",

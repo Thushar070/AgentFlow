@@ -20,12 +20,12 @@ ERROR_CATEGORIES = (
 def upgrade() -> None:
     op.add_column("workflow_runs", sa.Column("error_category", sa.String(40), nullable=True))
     op.add_column("step_runs", sa.Column("error_category", sa.String(40), nullable=True))
-    with op.batch_alter_table("workflow_runs", recreate="always") as batch:
+    with op.batch_alter_table("workflow_runs", recreate="auto") as batch:
         batch.create_check_constraint(
             "ck_run_error_category",
             f"error_category IS NULL OR error_category IN ({ERROR_CATEGORIES})",
         )
-    with op.batch_alter_table("step_runs", recreate="always") as batch:
+    with op.batch_alter_table("step_runs", recreate="auto") as batch:
         batch.create_check_constraint(
             "ck_step_error_category",
             f"error_category IS NULL OR error_category IN ({ERROR_CATEGORIES})",

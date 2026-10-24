@@ -32,7 +32,7 @@ def upgrade() -> None:
     connection.exec_driver_sql(
         "UPDATE workflow_runs SET created_at=COALESCE(started_at, finished_at, CURRENT_TIMESTAMP)"
     )
-    with op.batch_alter_table("workflow_runs", recreate="always") as batch:
+    with op.batch_alter_table("workflow_runs", recreate="auto") as batch:
         batch.alter_column("created_at", existing_type=sa.DateTime(timezone=True), nullable=False)
 
 

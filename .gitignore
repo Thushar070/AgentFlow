@@ -1,6 +1,7 @@
 .env
 .env.local
 .env.*.local
+.local/
 .venv/
 *.egg-info/
 __pycache__/
@@ -22,3 +23,8 @@ coverage/
 playwright-report/
 test-results/
 *.tsbuildinfo
+.neon
+
+# Keep only the root README in Git; local notes and other Markdown stay untracked.
+*.md
+!/README.md
