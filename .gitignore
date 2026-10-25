@@ -1,6 +1,8 @@
+# Environment-specific configuration and credentials. Keep only templates tracked.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!**/.env.example
 .local/
 .venv/
 *.egg-info/
@@ -24,6 +26,16 @@ playwright-report/
 test-results/
 *.tsbuildinfo
 .neon
+**/.secrets/
+secrets/
+*.secret
+*.secrets
+*.pem
+*.p12
+*.pfx
+*.key
+*credentials*.json
+*service-account*.json
 
 # Keep only the root README in Git; local notes and other Markdown stay untracked.
 *.md

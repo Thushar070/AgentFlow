@@ -26,6 +26,7 @@ MAX_PROMPT_CHARS = 4_000
 MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024
 MAX_PROPOSAL_BYTES = 64 * 1024
 MAX_GENERATION_TOKENS = 4_096
+MAX_GENERATION_ATTEMPTS = 2
 WORKFLOW_INTENT = re.compile(
     r"\b(workflows?|automations?|automate|automatically|repeatable process|trigger)\b"
     r"|\bwhen\b.{1,250}\bthen\b"
@@ -209,11 +210,12 @@ async def propose_definition(
             "FreeLLMAPI is not configured. Add its unified API key to FREELLMAPI_API_KEY.",
         )
     authorization_key = api_key.get_secret_value()
+    messages = [
+        {"role": "system", "content": _system_prompt()},
+        {"role": "user", "content": prompt.strip()},
+    ]
     payload = {
-        "messages": [
-            {"role": "system", "content": _system_prompt()},
-            {"role": "user", "content": prompt.strip()},
-        ],
+        "messages": messages,
         "stream": False,
         "max_tokens": MAX_GENERATION_TOKENS,
         "temperature": 0.1,
@@ -229,115 +231,168 @@ async def propose_definition(
     # FreeLLMAPI requires `auto` to use the unified key's active fallback chain.
     # This is a routing selector, not a pinned upstream model.
     payload["model"] = settings.freellmapi_model
-    try:
-        async with httpx.AsyncClient(
-            base_url=base_url,
-            timeout=httpx.Timeout(settings.freellmapi_timeout_seconds),
-            follow_redirects=False,
-            trust_env=False,
-            transport=transport,
-        ) as client:
-            async with client.stream(
-                "POST",
-                "chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {authorization_key}"},
-            ) as response:
-                if response.status_code in {401, 403}:
-                    raise ProposalFailure(
-                        503,
-                        "FreeLLMAPI rejected its unified API key. Check FREELLMAPI_API_KEY.",
-                    )
-                if response.status_code == 429:
-                    raise ProposalFailure(
-                        503,
-                        f"{provider_name} has no available upstream quota right now. "
-                        "Try again later.",
-                    )
-                if response.status_code == 404:
-                    raise ProposalFailure(
-                        503,
-                        "FreeLLMAPI could not route to an available model. Check its "
-                        "active fallback chain and enabled provider credentials.",
-                    )
-                if response.status_code in {400, 422}:
-                    raise ProposalFailure(
-                        502,
-                        f"{provider_name} rejected structured JSON output. "
-                        "Choose a compatible model or routing profile.",
-                    )
-                if response.status_code >= 500:
-                    raise ProposalFailure(
-                        503,
-                        "FreeLLMAPI received the request, but its active upstream provider "
-                        "could not be reached. Check the gateway and active fallback chain.",
-                    )
-                if response.status_code < 200 or response.status_code >= 300:
-                    raise ProposalFailure(502, "FreeLLMAPI could not generate a workflow proposal.")
-                chunks = bytearray()
-                async for chunk in response.aiter_bytes():
-                    chunks.extend(chunk)
-                    if len(chunks) > MAX_PROVIDER_RESPONSE_BYTES:
-                        raise ProposalFailure(502, "The model response exceeded the size limit.")
-    except ProposalFailure:
-        raise
-    except httpx.TimeoutException as exc:
-        raise ProposalFailure(
-            504, f"{provider_name} did not respond before the configured timeout."
-        ) from exc
-    except httpx.RequestError as exc:
-        raise ProposalFailure(
-            503,
-            "FreeLLMAPI could not be reached at its configured local gateway URL.",
-        ) from exc
+    async with httpx.AsyncClient(
+        base_url=base_url,
+        timeout=httpx.Timeout(settings.freellmapi_timeout_seconds),
+        follow_redirects=False,
+        trust_env=False,
+        transport=transport,
+    ) as client:
+        for attempt in range(MAX_GENERATION_ATTEMPTS):
+            payload["messages"] = messages
+            try:
+                async with client.stream(
+                    "POST",
+                    "chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {authorization_key}"},
+                ) as response:
+                    if response.status_code in {401, 403}:
+                        raise ProposalFailure(
+                            503,
+                            "FreeLLMAPI rejected its unified API key. Check FREELLMAPI_API_KEY.",
+                        )
+                    if response.status_code == 429:
+                        raise ProposalFailure(
+                            503,
+                            f"{provider_name} has no available upstream quota right now. "
+                            "Try again later.",
+                        )
+                    if response.status_code == 404:
+                        raise ProposalFailure(
+                            503,
+                            "FreeLLMAPI could not route to an available model. Check its "
+                            "active fallback chain and enabled provider credentials.",
+                        )
+                    if response.status_code in {400, 422}:
+                        raise ProposalFailure(
+                            502,
+                            f"{provider_name} rejected structured JSON output. "
+                            "Choose a compatible model or routing profile.",
+                        )
+                    if response.status_code >= 500:
+                        raise ProposalFailure(
+                            503,
+                            "FreeLLMAPI received the request, but its active upstream provider "
+                            "could not be reached. Check the gateway and active fallback chain.",
+                        )
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raise ProposalFailure(
+                            502, "FreeLLMAPI could not generate a workflow proposal."
+                        )
+                    chunks = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        chunks.extend(chunk)
+                        if len(chunks) > MAX_PROVIDER_RESPONSE_BYTES:
+                            raise ProposalFailure(
+                                502, "The model response exceeded the size limit."
+                            )
+            except ProposalFailure:
+                raise
+            except httpx.TimeoutException as exc:
+                raise ProposalFailure(
+                    504, f"{provider_name} did not respond before the configured timeout."
+                ) from exc
+            except httpx.RequestError as exc:
+                raise ProposalFailure(
+                    503,
+                    "FreeLLMAPI could not be reached at its configured local gateway URL.",
+                ) from exc
 
-    try:
-        envelope = json.loads(chunks)
-        choice = envelope.get("choices", [])[0]
-        message = choice.get("message", {})
-        if message.get("refusal"):
-            raise ProposalFailure(422, "The model declined to generate this workflow proposal.")
-        if choice.get("finish_reason") == "length":
-            raise ValueError("response was truncated")
-        content = message.get("content")
-        if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_PROPOSAL_BYTES:
-            raise ValueError("content missing or too large")
-        candidate = json.loads(content)
-    except ProposalFailure:
-        raise
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        AttributeError,
-        IndexError,
-        TypeError,
-        ValueError,
-    ) as exc:
-        raise ProposalFailure(
-            502, f"{provider_name} returned malformed or oversized workflow JSON."
-        ) from exc
+            try:
+                envelope = json.loads(chunks)
+                choice = envelope.get("choices", [])[0]
+                message = choice.get("message", {})
+                if message.get("refusal"):
+                    raise ProposalFailure(
+                        422, "The model declined to generate this workflow proposal."
+                    )
+                if choice.get("finish_reason") == "length":
+                    raise ValueError("response was truncated")
+                content = message.get("content")
+                if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_PROPOSAL_BYTES:
+                    raise ValueError("content missing or too large")
+                candidate = json.loads(content)
+            except ProposalFailure:
+                raise
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                AttributeError,
+                IndexError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                if attempt + 1 < MAX_GENERATION_ATTEMPTS:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your prior response was not a valid JSON workflow object. "
+                                "Retry once: return only a complete JSON object matching the "
+                                "provided schema, with no markdown or extra text."
+                            ),
+                        }
+                    )
+                    continue
+                raise ProposalFailure(
+                    502, f"{provider_name} returned malformed or oversized workflow JSON."
+                ) from exc
 
-    try:
-        definition = validate_definition(candidate)
-    except (ValidationError, ValueError, TypeError) as exc:
-        message = str(exc).lower()
-        if "unknown action" in message:
-            safe_message = "The generated proposal uses an action that is not registered."
-        elif "reference" in message or "earlier step" in message or "duplicate step" in message:
-            safe_message = "The generated proposal does not match AgentFlow's workflow rules."
-        elif "input" in message or "schema" in message:
-            safe_message = "The generated proposal has invalid action arguments."
-        else:
-            safe_message = "The generated proposal does not match AgentFlow's workflow rules."
-        raise ProposalFailure(422, safe_message) from exc
-    if any(isinstance(step, ConditionalDefinition) for step in definition.steps):
-        raise ProposalFailure(
-            422,
-            "The generated proposal uses branching that is not supported by the current "
-            "proposal editor. Add conditions in the visual builder instead.",
-        )
-    _check_action_permissions(definition, actor)
-    return definition.model_dump(mode="json", exclude_none=True)
+            validation_message = None
+            try:
+                definition = validate_definition(candidate)
+            except (ValidationError, ValueError, TypeError) as exc:
+                message_text = str(exc).lower()
+                if "unknown action" in message_text:
+                    validation_message = (
+                        "The generated proposal uses an action that is not registered."
+                    )
+                elif (
+                    "reference" in message_text
+                    or "earlier step" in message_text
+                    or "duplicate step" in message_text
+                ):
+                    validation_message = (
+                        "The generated proposal does not match AgentFlow's workflow rules."
+                    )
+                elif "input" in message_text or "schema" in message_text:
+                    validation_message = (
+                        "The generated proposal has invalid action arguments."
+                    )
+                else:
+                    validation_message = (
+                        "The generated proposal does not match AgentFlow's workflow rules."
+                    )
+            if validation_message is None and any(
+                isinstance(step, ConditionalDefinition) for step in definition.steps
+            ):
+                validation_message = (
+                    "The generated proposal uses branching that is not supported by the current "
+                    "proposal editor. Add conditions in the visual builder instead."
+                )
+            if validation_message is not None:
+                if attempt + 1 < MAX_GENERATION_ATTEMPTS:
+                    messages.extend(
+                        [
+                            {"role": "assistant", "content": content},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Revise your previous JSON workflow proposal. Validation "
+                                    f"feedback: {validation_message} Return only a corrected "
+                                    "JSON object matching the supplied schema."
+                                ),
+                            },
+                        ]
+                    )
+                    continue
+                raise ProposalFailure(422, validation_message)
+
+            _check_action_permissions(definition, actor)
+            return definition.model_dump(mode="json", exclude_none=True)
+
+    raise ProposalFailure(502, "FreeLLMAPI could not generate a valid workflow proposal.")
 
 
 @router.post("/api/workflows/proposals", response_model=WorkflowDefinition)
